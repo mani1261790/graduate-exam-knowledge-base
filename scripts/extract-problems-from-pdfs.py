@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+import argparse
+import hashlib
+import json
+import re
+from pathlib import Path
+
+import pdfplumber
+
+
+ROOT = Path(__file__).resolve().parent.parent
+SOURCES_PATH = ROOT / "data" / "crawl" / "sources.json"
+OUT_DIR = ROOT / "data" / "crawl"
+PROBLEMS_JSON = OUT_DIR / "problems.json"
+PROBLEMS_SQL = OUT_DIR / "import_problems.sql"
+
+SKIP_TITLE = re.compile(r"(出題の意図|解答|回答|answer|answers|purpose|intent|kaitou|solution)", re.IGNORECASE)
+SKIP_TEXT = re.compile(r"(入\s*試\s*案\s*内\s*書|募集要項|問い合わせ先|提出してください|出願|推薦書|研究計画書|application guidelines)", re.IGNORECASE)
+HEADING = re.compile(
+    r"(?=(?:^|\n)\s*(?:第\s*[一二三四五六七八九十0-9０-９]+\s*問|問題\s*[0-9０-９]+|問\s*[0-9０-９]+|Problem\s+[0-9]+)\b)",
+    re.IGNORECASE,
+)
+
+
+def sql_string(value):
+    if value is None or value == "":
+        return "NULL"
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def source_id(record):
+    prefix = re.sub(r"[^a-zA-Z0-9_]", "_", record["target_id"])
+    return f"src_{prefix}_{record['file_hash'][:12]}"
+
+
+def problem_id(source_document_id, index, text):
+    digest = hashlib.sha256(f"{source_document_id}:{index}:{text[:160]}".encode("utf-8")).hexdigest()[:16]
+    return f"prob_ext_{digest}"
+
+
+def node_id(entity_type, entity_id):
+    digest = hashlib.sha256(f"{entity_type}:{entity_id}".encode("utf-8")).hexdigest()[:20]
+    return f"node_{digest}"
+
+
+def normalize_text(text):
+    text = text.replace("\x00", "")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def extract_text(pdf_path, max_pages):
+    parts = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages[:max_pages]:
+            page_text = page.extract_text(x_tolerance=1.5, y_tolerance=3) or ""
+            if page_text:
+                parts.append(page_text)
+    return normalize_text("\n\n".join(parts))
+
+
+def split_problems(text):
+    matches = list(HEADING.finditer(text))
+    if len(matches) <= 1:
+        return [text] if len(text) >= 120 else []
+    chunks = []
+    for index, match in enumerate(matches):
+        start = match.start()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        chunk = normalize_text(text[start:end])
+        if len(chunk) >= 120:
+            chunks.append(chunk)
+    return chunks
+
+
+def infer_label(text, index):
+    first_line = text.splitlines()[0].strip()[:40] if text.splitlines() else ""
+    if first_line:
+        return first_line
+    return f"自動抽出 {index + 1}"
+
+
+def infer_answer_format(text):
+    if re.search(r"(証明|prove|show that)", text, re.IGNORECASE):
+        return "proof"
+    if re.search(r"(プログラム|algorithm|計算量|complexity)", text, re.IGNORECASE):
+        return "essay"
+    if re.search(r"(求めよ|calculate|compute)", text, re.IGNORECASE):
+        return "derivation"
+    return "mixed"
+
+
+def build_problem_records(records, max_pages, max_chars, max_problems):
+    problems = []
+    failures = []
+    for record in records:
+        if len(problems) >= max_problems:
+            break
+        if not record.get("downloaded") or record.get("error") or record.get("password_required"):
+            continue
+        if SKIP_TITLE.search(f"{record.get('title', '')} {record.get('source_url', '')}"):
+            continue
+        pdf_path = ROOT / "data" / record["storage_path"]
+        if not pdf_path.exists():
+            failures.append({"source_url": record["source_url"], "error": "missing local pdf"})
+            continue
+        try:
+            text = extract_text(pdf_path, max_pages=max_pages)
+            if SKIP_TEXT.search(text[:1800]):
+                continue
+            chunks = split_problems(text)
+        except Exception as exc:
+            failures.append({"source_url": record["source_url"], "error": str(exc)})
+            continue
+        source_document_id = source_id(record)
+        for index, chunk in enumerate(chunks):
+            if len(problems) >= max_problems:
+                break
+            statement = chunk[:max_chars]
+            pid = problem_id(source_document_id, index, statement)
+            problems.append(
+                {
+                    "id": pid,
+                    "source_document_id": source_document_id,
+                    "problem_label": infer_label(statement, index),
+                    "statement_text": statement,
+                    "subject_raw": record.get("default_subject") or record.get("exam_category") or "未分類",
+                    "difficulty": 3,
+                    "estimated_minutes": 30,
+                    "answer_format": infer_answer_format(statement),
+                    "status": "candidate",
+                    "created_by": "usr_extractor",
+                    "display_name": f"{record['university']} {record['exam_year']} {infer_label(statement, index)}",
+                }
+            )
+    return problems, failures
+
+
+def build_sql(problems):
+    lines = [
+        "-- Generated by scripts/extract-problems-from-pdfs.py",
+        "INSERT OR IGNORE INTO users (id, display_name, email, role, status) VALUES ('usr_extractor', 'PDF problem extractor', 'extractor@internal.local', 'editor', 'active');",
+        "DELETE FROM problem_search_fts WHERE problem_id IN (SELECT id FROM problems WHERE created_by = 'usr_extractor');",
+        "DELETE FROM node_registry WHERE entity_type = 'problem' AND entity_id IN (SELECT id FROM problems WHERE created_by = 'usr_extractor');",
+        "DELETE FROM problems WHERE created_by = 'usr_extractor';",
+    ]
+    for problem in problems:
+        lines.append(
+            "INSERT OR IGNORE INTO problems ("
+            "id, source_document_id, problem_label, statement_text, subject_raw, difficulty, estimated_minutes, answer_format, status, created_by"
+            ") VALUES ("
+            + ", ".join(
+                [
+                    sql_string(problem["id"]),
+                    sql_string(problem["source_document_id"]),
+                    sql_string(problem["problem_label"]),
+                    sql_string(problem["statement_text"]),
+                    sql_string(problem["subject_raw"]),
+                    str(problem["difficulty"]),
+                    str(problem["estimated_minutes"]),
+                    sql_string(problem["answer_format"]),
+                    sql_string(problem["status"]),
+                    sql_string(problem["created_by"]),
+                ]
+            )
+            + ");"
+        )
+        lines.append(
+            "INSERT OR IGNORE INTO node_registry (node_id, entity_type, entity_id, display_name) VALUES ("
+            + ", ".join([sql_string(node_id("problem", problem["id"])), "'problem'", sql_string(problem["id"]), sql_string(problem["display_name"])])
+            + ");"
+        )
+        lines.append(
+            "INSERT OR IGNORE INTO problem_search_fts (problem_id, statement_text, explanation_text) VALUES ("
+            + ", ".join([sql_string(problem["id"]), sql_string(problem["statement_text"]), "NULL"])
+            + ");"
+        )
+    touched_sources = sorted({problem["source_document_id"] for problem in problems})
+    for source_document_id in touched_sources:
+        lines.append(
+            f"UPDATE source_documents SET extraction_status = 'problem_split' WHERE id = {sql_string(source_document_id)};"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--max-pages", type=int, default=4)
+    parser.add_argument("--max-chars", type=int, default=5000)
+    parser.add_argument("--max-problems", type=int, default=700)
+    args = parser.parse_args()
+
+    records = json.loads(SOURCES_PATH.read_text())
+    problems, failures = build_problem_records(records, args.max_pages, args.max_chars, args.max_problems)
+    PROBLEMS_JSON.write_text(json.dumps({"problems": problems, "failures": failures}, ensure_ascii=False, indent=2) + "\n")
+    PROBLEMS_SQL.write_text(build_sql(problems))
+    print(json.dumps({"problems": len(problems), "failures": len(failures), "json": str(PROBLEMS_JSON), "sql": str(PROBLEMS_SQL)}, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()

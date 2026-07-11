@@ -1,0 +1,53 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "__WORKER_NAME__",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-07-09",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "routes": [
+    {
+      "pattern": "__CUSTOM_DOMAIN__",
+      "zone_name": "__ZONE_NAME__",
+      "custom_domain": true
+    }
+  ],
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "vars": {
+    "APP_ENV": "production"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "__D1_DATABASE_NAME__",
+      "database_id": "__D1_DATABASE_ID__",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "ai": {
+    "binding": "AI",
+    "remote": true
+  },
+  "queues": {
+    "producers": [
+      {
+        "binding": "RECOMMENDATION_QUEUE",
+        "queue": "__RECOMMENDATION_QUEUE__"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "__RECOMMENDATION_QUEUE__",
+        "max_batch_size": 10,
+        "max_batch_timeout": 30
+      }
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+[
+  {
+    "id": "sample-university-exams",
+    "university": "サンプル大学",
+    "graduate_school": "情報学研究科",
+    "department": "情報工学科",
+    "page_url": "https://example.com/graduate/exams",
+    "source_type": "official_pdf",
+    "access_scope": "source_link_only",
+    "default_subject": "専門科目",
+    "allowed_hosts": ["example.com"],
+    "include": ["pdf", "exam"],
+    "exclude": ["guideline", "application"]
+  }
+]

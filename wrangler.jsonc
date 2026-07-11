@@ -1,0 +1,59 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "graduate-exam-knowledge-base",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-07-09",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "vars": {
+    "APP_ENV": "local",
+    "MOCK_AUTH_EMAIL": "admin@example.com"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "graduate_exam_db",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "SOURCE_ASSETS",
+      "bucket_name": "graduate-exam-assets"
+    }
+  ],
+  "vectorize": [
+    {
+      "binding": "PROBLEM_VECTORS",
+      "index_name": "graduate-problem-vectors"
+    }
+  ],
+  "ai": {
+    "binding": "AI",
+    "remote": true
+  },
+  "queues": {
+    "producers": [
+      {
+        "binding": "RECOMMENDATION_QUEUE",
+        "queue": "graduate-recommendations"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "graduate-recommendations",
+        "max_batch_size": 10,
+        "max_batch_timeout": 30
+      }
+    ]
+  }
+}
