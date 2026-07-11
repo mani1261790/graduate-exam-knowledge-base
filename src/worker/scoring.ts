@@ -1,4 +1,5 @@
 import { clamp } from "./json";
+import type { RecommendationMode } from "./domain";
 
 export interface MasteryUpdateInput {
   result: "not_checked" | "correct" | "partial" | "wrong" | "skipped";
@@ -89,6 +90,44 @@ export function recommendationScore(input: {
     0,
     1,
   );
+}
+
+export interface RecommendationModeInput {
+  difficulty: number;
+  weakness: number;
+  targetMatch: number;
+  prerequisiteReadiness: number;
+  reviewDue: number;
+  hasAttempt: boolean;
+  recentlyMastered: boolean;
+}
+
+export function recommendationModeEligible(mode: RecommendationMode, input: RecommendationModeInput): boolean {
+  if (mode === "review") return input.reviewDue > 0 || input.hasAttempt;
+  if (input.recentlyMastered) return false;
+  if (mode === "foundation") return input.difficulty <= 2 || input.prerequisiteReadiness < 0.5;
+  if (mode === "challenge") return input.difficulty >= 4 && input.prerequisiteReadiness >= 0.5;
+  return input.difficulty >= 2 && input.difficulty <= 3 && input.prerequisiteReadiness >= 0.35 && input.reviewDue === 0;
+}
+
+export function recommendationModeScore(mode: RecommendationMode, input: RecommendationModeInput): number {
+  const normalizedDifficulty = clamp((input.difficulty - 1) / 4, 0, 1);
+  if (mode === "review") {
+    return clamp(input.reviewDue * 0.5 + (input.hasAttempt ? 0.2 : 0) + input.weakness * 0.3, 0, 1);
+  }
+  if (mode === "foundation") {
+    return clamp((1 - input.prerequisiteReadiness) * 0.4 + (1 - normalizedDifficulty) * 0.25 + input.weakness * 0.2 + input.targetMatch * 0.15, 0, 1);
+  }
+  if (mode === "challenge") {
+    return clamp(normalizedDifficulty * 0.4 + input.prerequisiteReadiness * 0.3 + input.targetMatch * 0.2 + input.weakness * 0.1, 0, 1);
+  }
+  return recommendationScore({
+    weakness: input.weakness,
+    targetMatch: input.targetMatch,
+    prerequisiteReadiness: input.prerequisiteReadiness,
+    reviewDue: input.reviewDue,
+    similarConnection: 0.3,
+  });
 }
 
 const ACADEMIC_FIELD_KEYWORDS = [

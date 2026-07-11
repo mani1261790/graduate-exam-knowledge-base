@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { academicFieldMatch, conceptJaccard, effectiveScore, nextMastery, recommendationScore, similarProblemScore } from "../src/worker/scoring";
+import { academicFieldMatch, conceptJaccard, effectiveScore, nextMastery, recommendationModeEligible, recommendationModeScore, recommendationScore, similarProblemScore } from "../src/worker/scoring";
 
 describe("scoring", () => {
   it("matches information engineering users with computing departments", () => {
@@ -48,6 +48,24 @@ describe("scoring", () => {
         similarConnection: 0.2,
       }),
     ).toBeCloseTo(0.745);
+  });
+
+  it("separates recommendation modes by learning purpose", () => {
+    const base = {
+      difficulty: 2,
+      weakness: 0.6,
+      targetMatch: 0.9,
+      prerequisiteReadiness: 0.7,
+      reviewDue: 0,
+      hasAttempt: false,
+      recentlyMastered: false,
+    };
+    expect(recommendationModeEligible("foundation", base)).toBe(true);
+    expect(recommendationModeEligible("challenge", base)).toBe(false);
+    expect(recommendationModeEligible("review", base)).toBe(false);
+    expect(recommendationModeEligible("challenge", { ...base, difficulty: 5 })).toBe(true);
+    expect(recommendationModeEligible("review", { ...base, hasAttempt: true })).toBe(true);
+    expect(recommendationModeScore("foundation", base)).not.toBe(recommendationModeScore("challenge", { ...base, difficulty: 5 }));
   });
 
   it("computes concept Jaccard", () => {

@@ -1,6 +1,6 @@
 import type { AppUser, ConceptSummary, ProblemDetail, ProblemListItem, RecommendationMode, SimilarProblem } from "./domain";
 import { parseJsonArray } from "./json";
-import { academicFieldMatch, recommendationScore, similarProblemScore } from "./scoring";
+import { academicFieldMatch, recommendationModeEligible, recommendationModeScore, similarProblemScore } from "./scoring";
 
 type ProblemRow = Omit<ProblemListItem, "concepts">;
 
@@ -327,51 +327,37 @@ export async function buildRecommendations(db: D1Database, userId: string, mode:
   const user = await db.prepare("SELECT department FROM users WHERE id = ?").bind(userId).first<{ department: string | null }>();
   const problems = await db
     .prepare(
-      `SELECT p.id, p.difficulty, p.estimated_minutes, sd.university, sd.graduate_school, sd.department, p.subject_raw
+      `SELECT p.id, p.difficulty, p.estimated_minutes, sd.university, sd.graduate_school, sd.department, p.subject_raw,
+              COALESCE(AVG(CASE WHEN ke.edge_type = 'tests' THEN 1 - COALESCE(ucs.mastery_score, 0.5) END), 0) AS weakness,
+              COALESCE(AVG(CASE WHEN ke.edge_type = 'requires' THEN COALESCE(ucs.mastery_score, 0.5) END), 1) AS prerequisite_readiness,
+              MAX(CASE WHEN ucs.review_due_at IS NOT NULL AND ucs.review_due_at <= datetime('now') THEN 1 ELSE 0 END) AS review_due,
+              EXISTS(SELECT 1 FROM attempts a WHERE a.user_id = ? AND a.problem_id = p.id) AS has_attempt,
+              EXISTS(
+                SELECT 1 FROM attempts a
+                WHERE a.user_id = ? AND a.problem_id = p.id AND a.score_rate >= 0.85
+                  AND a.created_at >= datetime('now', '-30 days')
+              ) AS recently_mastered
        FROM problems p
        JOIN source_documents sd ON sd.id = p.source_document_id
-       WHERE p.status = 'reviewed'`,
+       LEFT JOIN node_registry nr_problem ON nr_problem.entity_type = 'problem' AND nr_problem.entity_id = p.id
+       LEFT JOIN knowledge_edges ke ON ke.from_node_id = nr_problem.node_id
+         AND ke.status = 'approved' AND ke.edge_type IN ('tests', 'requires', 'solved_by')
+       LEFT JOIN node_registry nr_concept ON nr_concept.node_id = ke.to_node_id AND nr_concept.entity_type = 'concept'
+       LEFT JOIN user_concept_states ucs ON ucs.concept_id = nr_concept.entity_id AND ucs.user_id = ?
+       WHERE p.status = 'reviewed'
+       GROUP BY p.id`,
     )
+    .bind(userId, userId, userId)
     .all<Record<string, unknown>>();
 
   await db.prepare("DELETE FROM recommendation_candidates WHERE user_id = ? AND mode = ?").bind(userId, mode).run();
 
+  const candidates: Array<{ problemId: string; score: number; reasons: string[] }> = [];
   for (const problem of problems.results) {
-    const conceptRows = await db
-      .prepare(
-        `SELECT c.id, ke.edge_type, COALESCE(ucs.mastery_score, 0.5) AS mastery_score, ucs.review_due_at
-         FROM knowledge_edges ke
-         JOIN node_registry nr_problem ON nr_problem.node_id = ke.from_node_id
-         JOIN node_registry nr_concept ON nr_concept.node_id = ke.to_node_id
-         JOIN concepts c ON c.id = nr_concept.entity_id
-         LEFT JOIN user_concept_states ucs ON ucs.concept_id = c.id AND ucs.user_id = ?
-         WHERE nr_problem.entity_type = 'problem'
-           AND nr_concept.entity_type = 'concept'
-           AND nr_problem.entity_id = ?
-           AND ke.status = 'approved'
-           AND ke.edge_type IN ('tests', 'requires', 'solved_by')`,
-      )
-      .bind(userId, String(problem.id))
-      .all<{ id: string; edge_type: string; mastery_score: number; review_due_at: string | null }>();
-
-    const tests = conceptRows.results.filter((row) => row.edge_type === "tests");
-    const requires = conceptRows.results.filter((row) => row.edge_type === "requires");
-    const weakness = tests.length === 0 ? 0 : tests.reduce((sum, row) => sum + (1 - row.mastery_score), 0) / tests.length;
-    const prerequisiteReadiness = requires.length === 0 ? 1 : requires.reduce((sum, row) => sum + row.mastery_score, 0) / requires.length;
-    const reviewDue = conceptRows.results.some((row) => row.review_due_at && new Date(row.review_due_at) <= new Date()) ? 1 : 0;
-
-    if (mode === "foundation" && prerequisiteReadiness >= 0.35) continue;
-    if (mode === "normal" && prerequisiteReadiness < 0.35) continue;
-
-    const alreadySolved = await db
-      .prepare(
-        `SELECT 1 FROM attempts
-         WHERE user_id = ? AND problem_id = ? AND score_rate >= 0.85 AND created_at >= datetime('now', '-30 days')
-         LIMIT 1`,
-      )
-      .bind(userId, String(problem.id))
-      .first();
-    if (mode !== "review" && alreadySolved) continue;
+    const weakness = Number(problem.weakness ?? 0);
+    const prerequisiteReadiness = Number(problem.prerequisite_readiness ?? 1);
+    const reviewDue = Number(problem.review_due ?? 0);
+    const difficulty = Number(problem.difficulty);
 
     const sourceDepartment = String(problem.department ?? "").trim();
     const subject = String(problem.subject_raw ?? "").trim();
@@ -382,27 +368,38 @@ export async function buildRecommendations(db: D1Database, userId: string, mode:
         ? [subject]
         : [String(problem.graduate_school ?? "")];
     const targetMatch = academicFieldMatch(user?.department, targetFields);
-    const score = recommendationScore({
+    const modeInput = {
+      difficulty,
       weakness,
       targetMatch,
       prerequisiteReadiness,
       reviewDue,
-      similarConnection: 0.3,
-    });
+      hasAttempt: Boolean(problem.has_attempt),
+      recentlyMastered: Boolean(problem.recently_mastered),
+    };
+    if (!recommendationModeEligible(mode, modeInput)) continue;
+    const score = recommendationModeScore(mode, modeInput);
+    const modeReason = {
+      normal: "今日のバランス演習",
+      review: "学習履歴から復習",
+      foundation: "基礎レベルを優先",
+      challenge: "高難度に挑戦",
+    }[mode];
     const reasons = [
+      modeReason,
       targetMatch >= 0.8 ? "所属分野に関連" : null,
       weakness >= 0.5 ? "弱点Conceptに一致" : "Concept演習",
       prerequisiteReadiness < 0.35 ? "前提補修" : "前提知識は演習可能",
-      reviewDue ? "復習期限" : "通常推薦",
+      reviewDue ? "復習期限" : null,
     ].filter((reason): reason is string => Boolean(reason));
+    candidates.push({ problemId: String(problem.id), score, reasons });
+  }
 
-    await db
-      .prepare(
-        `INSERT INTO recommendation_candidates (user_id, problem_id, mode, score, reasons)
-         VALUES (?, ?, ?, ?, ?)`,
-      )
-      .bind(userId, String(problem.id), mode, score, JSON.stringify(reasons))
-      .run();
+  for (let start = 0; start < candidates.length; start += 15) {
+    const chunk = candidates.slice(start, start + 15);
+    const values = chunk.map(() => "(?, ?, ?, ?, ?)").join(", ");
+    const bindings = chunk.flatMap((candidate) => [userId, candidate.problemId, mode, candidate.score, JSON.stringify(candidate.reasons)]);
+    await db.prepare(`INSERT INTO recommendation_candidates (user_id, problem_id, mode, score, reasons) VALUES ${values}`).bind(...bindings).run();
   }
 }
 
@@ -412,6 +409,12 @@ export async function listRecommendations(
   mode: RecommendationMode,
   limit = 20,
 ): Promise<Array<ProblemListItem & { score: number; reasons: string[] }>> {
+  const modeReason = {
+    normal: "今日のバランス演習",
+    review: "学習履歴から復習",
+    foundation: "基礎レベルを優先",
+    challenge: "高難度に挑戦",
+  }[mode];
   let rows = await db
     .prepare(
       `SELECT p.id, p.problem_label, p.statement_text, p.page_start, p.page_end,
@@ -431,7 +434,8 @@ export async function listRecommendations(
     .bind(user.id, user.id, mode, limit)
     .all<ProblemRow & { score: number; reasons: string }>();
 
-  if (rows.results.length === 0) {
+  const reasonsAreCurrent = rows.results.some((row) => parseJsonArray<string>(row.reasons).includes(modeReason));
+  if (rows.results.length === 0 || !reasonsAreCurrent) {
     await buildRecommendations(db, user.id, mode);
     rows = await db
       .prepare(
