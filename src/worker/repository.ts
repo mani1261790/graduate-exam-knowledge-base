@@ -395,8 +395,11 @@ export async function buildRecommendations(db: D1Database, userId: string, mode:
     candidates.push({ problemId: String(problem.id), score, reasons });
   }
 
-  for (let start = 0; start < candidates.length; start += 15) {
-    const chunk = candidates.slice(start, start + 15);
+  const rankedCandidates = candidates
+    .sort((left, right) => right.score - left.score || left.problemId.localeCompare(right.problemId))
+    .slice(0, 100);
+  for (let start = 0; start < rankedCandidates.length; start += 15) {
+    const chunk = rankedCandidates.slice(start, start + 15);
     const values = chunk.map(() => "(?, ?, ?, ?, ?)").join(", ");
     const bindings = chunk.flatMap((candidate) => [userId, candidate.problemId, mode, candidate.score, JSON.stringify(candidate.reasons)]);
     await db.prepare(`INSERT INTO recommendation_candidates (user_id, problem_id, mode, score, reasons) VALUES ${values}`).bind(...bindings).run();
