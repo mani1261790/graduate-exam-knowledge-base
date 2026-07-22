@@ -2,6 +2,15 @@
 
 大学院入試の学習を、大学別のファイル置き場ではなく、分野・類題・学習履歴から辿れるようにするCloudflareベースの演習アプリです。
 
+## リポジトリ構成
+
+このプロジェクトは、公開ソースと本番運用を明確に分けています。
+
+- [`graduate-exam-knowledge-base`](https://github.com/mani1261790/graduate-exam-knowledge-base): 公開ソースコードの正本
+- `graduate-exam-knowledge-base-production`（Private）: Cloudflareへの本番デプロイとGitHub Secretsの管理
+
+両リポジトリの `main` には同じ公開可能なコミットを同期します。本番デプロイはPrivate側へのpushで実行され、Secretsや本番データがPublic側へ入ることはありません。
+
 ## 主な機能
 
 - 分野・キーワードからの問題探索
