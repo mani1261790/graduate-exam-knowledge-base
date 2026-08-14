@@ -1,0 +1,22 @@
+{
+  "graph_id": "computer_systems_curated_v1",
+  "topic": "計算機システムとソフトウェア",
+  "created_at": "2026-08-13T00:00:00Z",
+  "meta": {
+    "source": "Curated for graduate-exam preparation using the KTaisei/KnowledgeGraph schema",
+    "review_status": "reviewed"
+  },
+  "nodes": [
+    { "node_id": "N01", "label": "計算機基礎", "type": "FOUNDATIONAL", "layer": 0, "description": "情報表現、命令、メモリの基本を押さえ、計算機を層として理解する。", "prerequisites": [] },
+    { "node_id": "N02", "label": "論理回路", "type": "FOUNDATIONAL", "layer": 0, "description": "ブール代数と論理ゲートから、組合せ回路・順序回路を構成する。", "prerequisites": ["N01"] },
+    { "node_id": "N03", "label": "プログラミング言語", "type": "FOUNDATIONAL", "layer": 0, "description": "型、スコープ、実行モデルを通じてプログラムの意味を説明する。", "prerequisites": ["N01"] },
+    { "node_id": "N04", "label": "データ構造", "type": "BASIC", "layer": 1, "description": "配列、リスト、木、ハッシュを計算量と用途に応じて選択する。", "prerequisites": ["N03"] },
+    { "node_id": "N05", "label": "計算機アーキテクチャ", "type": "BASIC", "layer": 1, "description": "命令セット、パイプライン、キャッシュ、入出力を性能と結びつけて扱う。", "prerequisites": ["N01", "N02"] },
+    { "node_id": "N06", "label": "オペレーティングシステム", "type": "BASIC", "layer": 1, "description": "プロセス、仮想記憶、ファイル、スケジューリングで資源管理を理解する。", "prerequisites": ["N03", "N05"] },
+    { "node_id": "N07", "label": "データベース", "type": "BASIC", "layer": 1, "description": "関係モデル、SQL、正規化、トランザクションでデータを一貫して扱う。", "prerequisites": ["N03", "N04"] },
+    { "node_id": "N08", "label": "ネットワーク通信", "type": "CORE", "layer": 2, "description": "階層化、TCP/IP、経路制御を通じてデータ通信の仕組みを説明する。", "prerequisites": ["N05"] },
+    { "node_id": "N09", "label": "ソフトウェア工学", "type": "CORE", "layer": 2, "description": "要求、設計、テスト、保守を結び付け、品質を担保する。", "prerequisites": ["N03", "N04"] },
+    { "node_id": "N10", "label": "計算機システム", "type": "APPLICATION", "layer": 3, "description": "ハードウェア、OS、ネットワーク、ソフトウェアの相互作用を問題に応じて説明する。", "prerequisites": ["N06", "N07", "N08", "N09"] }
+  ],
+  "edges": []
+}

@@ -1,0 +1,12 @@
+{
+  "N01": ["con_computer_fundamentals"],
+  "N02": ["con_digital_logic"],
+  "N03": ["con_programming_language"],
+  "N04": ["con_data_structure"],
+  "N05": ["con_computer_architecture"],
+  "N06": ["con_operating_system"],
+  "N07": ["con_database"],
+  "N08": ["con_network_communications"],
+  "N09": ["con_software_engineering"],
+  "N10": ["con_computer_systems_extended"]
+}

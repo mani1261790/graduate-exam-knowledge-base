@@ -1,5 +1,30 @@
 import { clamp } from "./json";
-import type { RecommendationMode } from "./domain";
+import type { AttemptInput, RecommendationMode } from "./domain";
+
+const ATTEMPT_RESULTS = ["not_checked", "correct", "partial", "wrong", "skipped"] as const;
+const MISTAKE_TYPES = ["concept_missing", "formula_missing", "calculation_error", "proof_gap", "misread_problem", "time_over", "implementation_error", "unknown"] as const;
+
+export function attemptInputError(input: unknown): string | null {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return "学習記録の形式が正しくありません。";
+  const candidate = input as Partial<AttemptInput>;
+  if (typeof candidate.problem_id !== "string" || !candidate.problem_id.trim() || candidate.problem_id.length > 200) return "問題IDが正しくありません。";
+  if (!candidate.result || !ATTEMPT_RESULTS.includes(candidate.result)) return "結果を選んでください。";
+  if (candidate.result === "not_checked") return "結果を選んでから保存してください。";
+  if (candidate.started_at !== undefined && (typeof candidate.started_at !== "string" || !Number.isFinite(Date.parse(candidate.started_at)))) return "開始時刻が正しくありません。";
+  if (candidate.time_spent_minutes !== undefined && (!Number.isInteger(candidate.time_spent_minutes) || candidate.time_spent_minutes < 0 || candidate.time_spent_minutes > 1_440)) return "所要時間は0〜1440分で入力してください。";
+  if (candidate.score_rate !== undefined && (!Number.isFinite(candidate.score_rate) || candidate.score_rate < 0 || candidate.score_rate > 1)) return "達成度は0〜1で入力してください。";
+  if (candidate.self_confidence !== undefined && (!Number.isInteger(candidate.self_confidence) || candidate.self_confidence < 1 || candidate.self_confidence > 5)) return "自信度は1〜5で入力してください。";
+  if (candidate.note !== undefined && (typeof candidate.note !== "string" || candidate.note.length > 2_000)) return "復習メモは2000文字以内で入力してください。";
+  if (candidate.mistakes !== undefined) {
+    if (!Array.isArray(candidate.mistakes) || candidate.mistakes.length > 20) return "つまずきは20件以内で入力してください。";
+    for (const mistake of candidate.mistakes) {
+      if (!mistake || typeof mistake !== "object" || !MISTAKE_TYPES.includes(mistake.mistake_type)) return "つまずきの種類が正しくありません。";
+      if (mistake.concept_id !== undefined && (typeof mistake.concept_id !== "string" || !mistake.concept_id || mistake.concept_id.length > 200)) return "つまずいた分野が正しくありません。";
+      if (mistake.note !== undefined && (typeof mistake.note !== "string" || mistake.note.length > 500)) return "つまずきメモは500文字以内で入力してください。";
+    }
+  }
+  return null;
+}
 
 export interface MasteryUpdateInput {
   result: "not_checked" | "correct" | "partial" | "wrong" | "skipped";
@@ -131,7 +156,7 @@ export function recommendationModeScore(mode: RecommendationMode, input: Recomme
 }
 
 const ACADEMIC_FIELD_KEYWORDS = [
-  ["情報", "コンピュータ", "計算機", "ソフトウェア", "データ", "知能", "AI", "アルゴリズム"],
+  ["情報工学", "情報科学", "情報理工", "コンピュータ", "計算機", "ソフトウェア", "データ", "知能", "AI", "アルゴリズム", "グラフ", "プログラミング", "論理"],
   ["電気", "電子", "通信", "制御", "信号"],
   ["機械", "ロボット", "航空"],
   ["数学", "数理", "統計"],

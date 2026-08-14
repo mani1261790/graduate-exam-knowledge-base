@@ -1,0 +1,23 @@
+{
+  "graph_id": "signals_control_communications_curated_v1",
+  "topic": "信号・制御・通信",
+  "created_at": "2026-08-13T00:00:00Z",
+  "meta": {
+    "source": "Curated for graduate-exam preparation using the KTaisei/KnowledgeGraph schema",
+    "review_status": "reviewed"
+  },
+  "nodes": [
+    { "node_id": "N01", "label": "微分積分", "type": "FOUNDATIONAL", "layer": 0, "description": "連続時間の変化を微分と積分で記述する。", "prerequisites": [] },
+    { "node_id": "N02", "label": "線形代数", "type": "FOUNDATIONAL", "layer": 0, "description": "ベクトルと行列で信号・状態を表現する。", "prerequisites": [] },
+    { "node_id": "N03", "label": "フーリエ解析", "type": "BASIC", "layer": 1, "description": "時間領域と周波数領域を結び、周期成分を解析する。", "prerequisites": ["N01"] },
+    { "node_id": "N04", "label": "ラプラス変換", "type": "BASIC", "layer": 1, "description": "微分方程式と伝達関数を変換領域で扱う。", "prerequisites": ["N01"] },
+    { "node_id": "N05", "label": "電気回路", "type": "BASIC", "layer": 1, "description": "回路方程式、周波数応答、受動素子の振る舞いを理解する。", "prerequisites": ["N01"] },
+    { "node_id": "N06", "label": "信号処理", "type": "CORE", "layer": 2, "description": "畳み込み、標本化、フィルタリングを使って信号を処理する。", "prerequisites": ["N03"] },
+    { "node_id": "N07", "label": "制御システム", "type": "CORE", "layer": 2, "description": "伝達関数と状態空間表現から、安定性とフィードバックを評価する。", "prerequisites": ["N02", "N04", "N05"] },
+    { "node_id": "N08", "label": "情報理論", "type": "CORE", "layer": 2, "description": "エントロピー、符号化、通信路容量で情報の限界を考える。", "prerequisites": ["N02"] },
+    { "node_id": "N09", "label": "暗号・符号", "type": "CORE", "layer": 2, "description": "誤り訂正と暗号化を、情報表現と通信の観点から扱う。", "prerequisites": ["N08"] },
+    { "node_id": "N10", "label": "ネットワーク通信", "type": "CORE", "layer": 2, "description": "プロトコル階層と通信制御を、システムとして説明する。", "prerequisites": ["N08"] },
+    { "node_id": "N11", "label": "通信システム", "type": "APPLICATION", "layer": 3, "description": "信号処理、符号化、ネットワークを組み合わせて通信系を設計・評価する。", "prerequisites": ["N06", "N07", "N09", "N10"] }
+  ],
+  "edges": []
+}

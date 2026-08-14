@@ -1,5 +1,4 @@
 import { Hono } from "hono";
-import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { auditLog } from "./audit";
 import { authenticateRequest, loginWithPassword, logoutSession, requireRole } from "./auth";
@@ -15,7 +14,16 @@ import {
   listRecommendations,
 } from "./repository";
 import { boundedIntegerParam } from "./query";
-import { effectiveScore, nextMastery, reviewDueIso } from "./scoring";
+import { attemptInputError, effectiveScore, nextMastery, reviewDueIso } from "./scoring";
+import {
+  completeConceptPlanItem,
+  generateStudyPlan,
+  getActiveStudyGoal,
+  getCurrentStudyPlan,
+  hasActiveLearningGraph,
+  markPlanItemsForAttempt,
+  upsertStudyGoal,
+} from "./study-plan";
 
 type Variables = {
   user: AppUser;
@@ -89,6 +97,21 @@ app.get("/pdf", (c) => {
 
 app.get("/api/session", (c) => c.json({ user: c.get("user") }));
 
+app.patch("/api/profile", async (c) => {
+  const user = c.get("user");
+  const body = await readJson<{ department?: unknown }>(c.req.raw);
+  if (typeof body.department !== "string") fail(400, "学習分野を入力してください。");
+  const department = body.department.trim().replace(/\s+/g, " ");
+  if (!department || department.length > 100) fail(400, "学習分野は1〜100文字で入力してください。");
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE users SET department = ? WHERE id = ?").bind(department, user.id),
+    c.env.DB.prepare("DELETE FROM recommendation_candidates WHERE user_id = ?").bind(user.id),
+  ]);
+  const updatedUser = { ...user, department };
+  await auditLog(c.env.DB, user, "profile.update", "user", user.id, { department: user.department }, { department });
+  return c.json({ user: updatedUser });
+});
+
 app.get("/api/concepts", async (c) => {
   const concepts = await listConcepts(c.env.DB, c.req.query("q"));
   return c.json({ concepts });
@@ -151,158 +174,10 @@ app.get("/api/problems", async (c) => {
   return c.json({ problems });
 });
 
-async function serveProblemPdf(c: Context<{ Bindings: Env; Variables: Variables }>, problemId: string) {
-  const user = c.get("user");
-  const row = await c.env.DB
-    .prepare(
-      `SELECT p.status, p.problem_label, sd.source_url, sd.storage_path
-       FROM problems p
-       JOIN source_documents sd ON sd.id = p.source_document_id
-       WHERE p.id = ?`,
-    )
-    .bind(problemId)
-    .first<{ status: string; problem_label: string; source_url: string | null; storage_path: string | null }>();
-  if (!row) fail(404, "Problem not found");
-  if (user.role === "member" && row.status !== "reviewed") fail(404, "Problem not found");
-
-  const sourceAssets = (c.env as Env & { SOURCE_ASSETS?: R2Bucket }).SOURCE_ASSETS;
-  if (sourceAssets && row.storage_path) {
-    const object = await sourceAssets.get(row.storage_path, { range: c.req.raw.headers });
-    if (object) {
-      const headers = new Headers();
-      object.writeHttpMetadata(headers);
-      headers.set("content-type", object.httpMetadata?.contentType || "application/pdf");
-      headers.set("content-disposition", `inline; filename="${encodeURIComponent(row.problem_label)}.pdf"`);
-      headers.set("cache-control", "private, max-age=3600");
-      headers.set("accept-ranges", "bytes");
-      headers.set("etag", object.httpEtag);
-      let status = 200;
-      if (object.range) {
-        let offset: number;
-        let length: number;
-        if ("suffix" in object.range) {
-          length = object.range.suffix;
-          offset = Math.max(0, object.size - length);
-        } else {
-          offset = object.range.offset ?? 0;
-          length = object.range.length ?? object.size - offset;
-        }
-        headers.set("content-range", `bytes ${offset}-${offset + length - 1}/${object.size}`);
-        headers.set("content-length", String(length));
-        status = 206;
-      } else {
-        headers.set("content-length", String(object.size));
-      }
-      return new Response(object.body, { status, headers });
-    }
-  }
-
-  if (!row.source_url) fail(404, "PDF source is not registered");
-
-  const requestHeaders = new Headers({
-    accept: "application/pdf,*/*;q=0.5",
-    "user-agent": "graduate-exam-knowledge-base/0.1",
-  });
-  const range = c.req.header("range");
-  if (range) requestHeaders.set("range", range);
-
-  const upstream = await fetch(row.source_url, {
-    headers: requestHeaders,
-    cache: "no-store",
-  });
-  if (!upstream.ok) fail(502, "PDF source could not be loaded");
-
-  const headers = new Headers(upstream.headers);
-  const contentType = upstream.headers.get("content-type") ?? "";
-  if (contentType.includes("text/html")) fail(502, "PDF source returned HTML instead of a PDF");
-  headers.set("content-type", contentType || "application/pdf");
-  headers.set("content-disposition", `inline; filename="${encodeURIComponent(row.problem_label)}.pdf"`);
-  headers.set("cache-control", "private, no-store");
-  headers.set("accept-ranges", upstream.headers.get("accept-ranges") || "bytes");
-  headers.delete("x-frame-options");
-  headers.delete("content-security-policy");
-  return new Response(upstream.body, { status: upstream.status, headers });
-}
-
-app.get("/api/problem-pdf", async (c) => {
-  const problemId = c.req.query("id");
-  if (!problemId) fail(400, "problem id is required");
-  return serveProblemPdf(c, problemId);
-});
-
-app.get("/api/problems/:id/pdf", async (c) => {
-  return serveProblemPdf(c, c.req.param("id"));
-});
-
 app.get("/api/problems/:id", async (c) => {
   const problem = await getProblem(c.env.DB, c.get("user"), c.req.param("id"));
   if (!problem) fail(404, "Problem not found");
   return c.json({ problem });
-});
-
-app.get("/api/problems/:id/workspace", async (c) => {
-  const problemId = c.req.param("id");
-  const user = c.get("user");
-  const problem = await c.env.DB
-    .prepare("SELECT status FROM problems WHERE id = ?")
-    .bind(problemId)
-    .first<{ status: string }>();
-  if (!problem || (user.role === "member" && problem.status !== "reviewed")) fail(404, "Problem not found");
-
-  const workspace = await c.env.DB
-    .prepare(
-      `SELECT strokes_json, revision, updated_at
-       FROM problem_workspaces
-       WHERE user_id = ? AND problem_id = ?`,
-    )
-    .bind(user.id, problemId)
-    .first<{ strokes_json: string; revision: number; updated_at: string }>();
-
-  return c.json({
-    workspace: workspace
-      ? {
-          strokes: JSON.parse(workspace.strokes_json) as unknown[],
-          revision: workspace.revision,
-          updated_at: workspace.updated_at,
-        }
-      : null,
-  });
-});
-
-app.put("/api/problems/:id/workspace", async (c) => {
-  const problemId = c.req.param("id");
-  const user = c.get("user");
-  const body = await readJson<{ strokes: unknown[] }>(c.req.raw);
-  if (!Array.isArray(body.strokes)) fail(400, "strokes must be an array");
-  const strokesJson = JSON.stringify(body.strokes);
-  if (new TextEncoder().encode(strokesJson).byteLength > 1_500_000) {
-    fail(413, "Canvas data is too large");
-  }
-
-  const problem = await c.env.DB
-    .prepare("SELECT status FROM problems WHERE id = ?")
-    .bind(problemId)
-    .first<{ status: string }>();
-  if (!problem || (user.role === "member" && problem.status !== "reviewed")) fail(404, "Problem not found");
-
-  const updatedAt = new Date().toISOString();
-  await c.env.DB
-    .prepare(
-      `INSERT INTO problem_workspaces (user_id, problem_id, strokes_json, revision, updated_at)
-       VALUES (?, ?, ?, 1, ?)
-       ON CONFLICT(user_id, problem_id) DO UPDATE SET
-         strokes_json = excluded.strokes_json,
-         revision = problem_workspaces.revision + 1,
-         updated_at = excluded.updated_at`,
-    )
-    .bind(user.id, problemId, strokesJson, updatedAt)
-    .run();
-  const saved = await c.env.DB
-    .prepare("SELECT revision FROM problem_workspaces WHERE user_id = ? AND problem_id = ?")
-    .bind(user.id, problemId)
-    .first<{ revision: number }>();
-
-  return c.json({ revision: saved?.revision ?? 1, updated_at: updatedAt });
 });
 
 app.post("/api/problems/:id/chat", async (c) => {
@@ -416,45 +291,78 @@ app.patch("/api/problems/:id", async (c) => {
 });
 
 app.get("/api/sources", async (c) => {
-  const limit = boundedIntegerParam(c.req.query("limit"), { defaultValue: 100, min: 1, max: 500 });
-  const university = c.req.query("university");
-  const where = university ? "WHERE university = ?" : "";
-  const bind = university ? [university, limit] : [limit];
-  const { results } = await c.env.DB
-    .prepare(
-      `SELECT id, source_type, title, university, graduate_school, department, exam_year, exam_category,
-              source_url, file_hash, storage_path, access_scope, extraction_status, created_at
-       FROM source_documents
-       ${where}
-       ORDER BY exam_year DESC, university ASC
-       LIMIT ?`,
-    )
-    .bind(...bind)
-    .all();
-  return c.json({ sources: results });
+  requireRole(c.get("user"), "editor");
+  const limit = boundedIntegerParam(c.req.query("limit"), { defaultValue: 50, min: 1, max: 100 });
+  const offset = boundedIntegerParam(c.req.query("offset"), { defaultValue: 0, min: 0, max: 100_000 });
+  const q = c.req.query("q")?.trim().slice(0, 200);
+  const university = c.req.query("university")?.trim();
+  const sourceStatus = c.req.query("status");
+  const displayMode = c.req.query("display");
+  if (sourceStatus && !["active", "unavailable", "needs_review"].includes(sourceStatus)) fail(400, "Unknown source status");
+  if (displayMode && !["embed", "external_only"].includes(displayMode)) fail(400, "Unknown PDF display mode");
+  const where: string[] = [];
+  const bind: unknown[] = [];
+  if (q) {
+    where.push("(sd.title LIKE ? OR sd.university LIKE ? OR COALESCE(sd.graduate_school, '') LIKE ? OR COALESCE(sd.department, '') LIKE ?)");
+    const like = `%${q}%`;
+    bind.push(like, like, like, like);
+  }
+  if (university) {
+    where.push("sd.university = ?");
+    bind.push(university);
+  }
+  if (sourceStatus) {
+    where.push("sd.source_status = ?");
+    bind.push(sourceStatus);
+  }
+  if (displayMode) {
+    where.push("sd.pdf_display_mode = ?");
+    bind.push(displayMode);
+  }
+  const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+  const [sourceResult, total] = await Promise.all([
+    c.env.DB.prepare(
+      `SELECT sd.id, sd.source_type, sd.title, sd.university, sd.graduate_school, sd.department,
+              sd.exam_year, sd.exam_category, sd.source_url, sd.publisher_page_url, sd.file_hash,
+              sd.storage_path, sd.access_scope, sd.pdf_display_mode, sd.source_status,
+              sd.source_checked_at, sd.extraction_status, sd.created_at,
+              (SELECT COUNT(*) FROM problems p WHERE p.source_document_id = sd.id) AS problem_count
+       FROM source_documents sd
+       ${whereSql}
+       ORDER BY CASE sd.source_status WHEN 'needs_review' THEN 0 WHEN 'unavailable' THEN 1 ELSE 2 END,
+                sd.exam_year DESC, sd.university ASC, sd.title ASC
+       LIMIT ? OFFSET ?`,
+    ).bind(...bind, limit, offset).all(),
+    c.env.DB.prepare(`SELECT COUNT(*) AS count FROM source_documents sd ${whereSql}`).bind(...bind).first<{ count: number }>(),
+  ]);
+  return c.json({ sources: sourceResult.results, total: total?.count ?? 0, limit, offset });
 });
 
 app.get("/api/source-stats", async (c) => {
-  const [total, byUniversity, byScope] = await Promise.all([
+  requireRole(c.get("user"), "editor");
+  const [total, byUniversity, byScope, byStatus, byDisplay] = await Promise.all([
     c.env.DB.prepare("SELECT COUNT(*) AS count FROM source_documents").first<{ count: number }>(),
     c.env.DB
       .prepare("SELECT university, COUNT(*) AS count FROM source_documents GROUP BY university ORDER BY count DESC, university ASC")
       .all(),
     c.env.DB.prepare("SELECT access_scope, COUNT(*) AS count FROM source_documents GROUP BY access_scope ORDER BY count DESC").all(),
+    c.env.DB.prepare("SELECT source_status, COUNT(*) AS count FROM source_documents GROUP BY source_status ORDER BY count DESC").all(),
+    c.env.DB.prepare("SELECT pdf_display_mode, COUNT(*) AS count FROM source_documents GROUP BY pdf_display_mode ORDER BY count DESC").all(),
   ]);
   return c.json({
     total: total?.count ?? 0,
     byUniversity: byUniversity.results,
     byScope: byScope.results,
+    byStatus: byStatus.results,
+    byDisplay: byDisplay.results,
   });
 });
 
 app.post("/api/sources", async (c) => {
   const user = c.get("user");
   requireRole(user, "editor");
-  const contentType = c.req.header("content-type") ?? "";
   const id = ulid("src");
-  let source: {
+  const source = await readJson<{
     source_type: string;
     title: string;
     university: string;
@@ -462,50 +370,41 @@ app.post("/api/sources", async (c) => {
     department?: string;
     exam_year: number;
     exam_category?: string;
-    source_url?: string;
+    source_url: string;
+    publisher_page_url?: string;
     access_scope: string;
-    file_hash: string;
-    storage_path: string;
-  };
-
-  if (contentType.includes("multipart/form-data")) {
-    const form = await c.req.raw.formData();
-    const file = form.get("file");
-    if (!(file instanceof File)) fail(400, "file is required");
-    const buffer = await file.arrayBuffer();
-    const fileHash = await sha256Hex(buffer);
-    const existing = await c.env.DB.prepare("SELECT id FROM source_documents WHERE file_hash = ?").bind(fileHash).first();
-    if (existing) fail(409, "SourceDocument with the same file_hash already exists");
-    if (!c.env.SOURCE_ASSETS) fail(503, "Source asset uploads are not configured for this environment");
-    const storagePath = `sources/${id}/${file.name}`;
-    await c.env.SOURCE_ASSETS.put(storagePath, buffer, { httpMetadata: { contentType: file.type || "application/octet-stream" } });
-    source = {
-      source_type: String(form.get("source_type") ?? "official_pdf"),
-      title: String(form.get("title") ?? file.name),
-      university: String(form.get("university") ?? ""),
-      graduate_school: String(form.get("graduate_school") ?? ""),
-      department: String(form.get("department") ?? ""),
-      exam_year: Number(form.get("exam_year")),
-      exam_category: String(form.get("exam_category") ?? ""),
-      source_url: String(form.get("source_url") ?? ""),
-      access_scope: String(form.get("access_scope") ?? "internal_only"),
-      file_hash: fileHash,
-      storage_path: storagePath,
-    };
-  } else {
-    const body = await readJson<typeof source>(c.req.raw);
-    const existing = await c.env.DB.prepare("SELECT id FROM source_documents WHERE file_hash = ?").bind(body.file_hash).first();
-    if (existing) fail(409, "SourceDocument with the same file_hash already exists");
-    source = body;
+    pdf_display_mode?: "embed" | "external_only";
+    source_status?: "active" | "unavailable" | "needs_review";
+  }>(c.req.raw);
+  if (!source.title?.trim() || !source.university?.trim() || !Number.isInteger(source.exam_year)) {
+    fail(400, "title, university and exam_year are required");
   }
-
-  if (!source.university || !source.exam_year) fail(400, "university and exam_year are required");
+  if (!['official_pdf', 'unofficial_pdf', 'scan', 'web_page', 'manual_input', 'book', 'other'].includes(source.source_type)) {
+    fail(400, "source_type is invalid");
+  }
+  if (source.pdf_display_mode !== undefined && !["embed", "external_only"].includes(source.pdf_display_mode)) {
+    fail(400, "pdf_display_mode must be embed or external_only");
+  }
+  if (source.source_status !== undefined && !["active", "unavailable", "needs_review"].includes(source.source_status)) {
+    fail(400, "source_status is invalid");
+  }
+  const sourceUrl = externalHttpsUrl(source.source_url, "source_url");
+  const publisherPageUrl = source.publisher_page_url ? externalHttpsUrl(source.publisher_page_url, "publisher_page_url") : null;
+  if (!['source_link_only', 'public_ready'].includes(source.access_scope)) fail(400, "only public link sources can be registered");
+  if (source.source_status === "active") {
+    requireRole(user, "reviewer");
+    assertPublishableSource(sourceUrl, source.access_scope);
+  }
+  const fileHash = await sha256Hex(new TextEncoder().encode(sourceUrl).buffer as ArrayBuffer);
+  const existing = await c.env.DB.prepare("SELECT id FROM source_documents WHERE file_hash = ? OR source_url = ?").bind(fileHash, sourceUrl).first();
+  if (existing) fail(409, "SourceDocument with the same public URL already exists");
   await c.env.DB
     .prepare(
       `INSERT INTO source_documents (
         id, source_type, title, university, graduate_school, department, exam_year, exam_category,
-        source_url, file_hash, storage_path, access_scope, extraction_status, created_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploaded', ?)`,
+        source_url, publisher_page_url, file_hash, storage_path, access_scope, pdf_display_mode,
+        source_status, source_checked_at, extraction_status, created_by
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, datetime('now'), 'uploaded', ?)`,
     )
     .bind(
       id,
@@ -516,15 +415,60 @@ app.post("/api/sources", async (c) => {
       source.department ?? null,
       source.exam_year,
       source.exam_category ?? null,
-      source.source_url ?? null,
-      source.file_hash,
-      source.storage_path,
+      sourceUrl,
+      publisherPageUrl,
+      fileHash,
       source.access_scope,
+      source.pdf_display_mode ?? "external_only",
+      source.source_status ?? "needs_review",
       user.id,
     )
     .run();
   await auditLog(c.env.DB, user, "source.create", "source_document", id, undefined, source);
-  return c.json({ id, file_hash: source.file_hash }, 201);
+  return c.json({ id, file_hash: fileHash }, 201);
+});
+
+app.patch("/api/sources/:id", async (c) => {
+  const user = c.get("user");
+  requireRole(user, "reviewer");
+  const body = await readJson<{
+    source_url?: string;
+    publisher_page_url?: string | null;
+    pdf_display_mode?: "embed" | "external_only";
+    source_status?: "active" | "unavailable" | "needs_review";
+    access_scope?: "source_link_only" | "public_ready";
+  }>(c.req.raw);
+  const before = await c.env.DB.prepare("SELECT * FROM source_documents WHERE id = ?").bind(c.req.param("id")).first();
+  if (!before) fail(404, "SourceDocument not found");
+  if (body.access_scope !== undefined && !["source_link_only", "public_ready"].includes(body.access_scope)) {
+    fail(400, "access_scope must be source_link_only or public_ready");
+  }
+  if (body.pdf_display_mode !== undefined && !["embed", "external_only"].includes(body.pdf_display_mode)) {
+    fail(400, "pdf_display_mode must be embed or external_only");
+  }
+  if (body.source_status !== undefined && !["active", "unavailable", "needs_review"].includes(body.source_status)) {
+    fail(400, "source_status is invalid");
+  }
+  const sourceUrl = body.source_url ? externalHttpsUrl(body.source_url, "source_url") : String(before.source_url ?? "");
+  const publisherPageUrl = body.publisher_page_url === undefined
+    ? before.publisher_page_url
+    : body.publisher_page_url ? externalHttpsUrl(body.publisher_page_url, "publisher_page_url") : null;
+  const nextAccessScope = body.access_scope ?? String(before.access_scope);
+  const nextSourceStatus = body.source_status ?? String(before.source_status);
+  if (nextSourceStatus === "active") assertPublishableSource(sourceUrl, nextAccessScope);
+  await c.env.DB.prepare(
+    `UPDATE source_documents SET source_url = ?, publisher_page_url = ?, access_scope = ?, pdf_display_mode = ?, source_status = ?,
+       source_checked_at = datetime('now') WHERE id = ?`,
+  ).bind(
+    sourceUrl,
+    publisherPageUrl,
+    nextAccessScope,
+    body.pdf_display_mode ?? before.pdf_display_mode,
+    nextSourceStatus,
+    c.req.param("id"),
+  ).run();
+  await auditLog(c.env.DB, user, "source.review", "source_document", c.req.param("id"), before, body);
+  return c.json({ id: c.req.param("id") });
 });
 
 app.post("/api/edges", async (c) => {
@@ -583,8 +527,10 @@ app.patch("/api/edges/:id/review", async (c) => {
 
 app.post("/api/attempts", async (c) => {
   const user = c.get("user");
-  const body = await readJson<AttemptInput>(c.req.raw);
-  if (body.result === "not_checked") fail(400, "Result must be selected before saving an attempt");
+  const rawBody = await readJson<unknown>(c.req.raw);
+  const inputError = attemptInputError(rawBody);
+  if (inputError) fail(400, inputError);
+  const body = rawBody as AttemptInput;
   const problem = await c.env.DB
     .prepare("SELECT id, estimated_minutes FROM problems WHERE id = ? AND status = 'reviewed'")
     .bind(body.problem_id)
@@ -613,7 +559,9 @@ app.post("/api/attempts", async (c) => {
     .all<{ id: string }>();
 
   const mistakeCounts = new Map<string, number>();
+  const allowedConceptIds = new Set(conceptRows.results.map((row) => row.id));
   for (const mistake of body.mistakes ?? []) {
+    if (mistake.concept_id && !allowedConceptIds.has(mistake.concept_id)) fail(400, "この問題に関連しない分野は記録できません。");
     if (mistake.concept_id) mistakeCounts.set(mistake.concept_id, (mistakeCounts.get(mistake.concept_id) ?? 0) + 1);
   }
 
@@ -694,6 +642,8 @@ app.post("/api/attempts", async (c) => {
       .run();
   }
 
+  await markPlanItemsForAttempt(c.env.DB, user.id, problem.id);
+
   await auditLog(c.env.DB, user, "attempt.create", "attempt", id, undefined, body);
   c.executionCtx.waitUntil(
     Promise.allSettled([
@@ -716,6 +666,51 @@ app.get("/api/recommendations", async (c) => {
   const limit = boundedIntegerParam(c.req.query("limit"), { defaultValue: 20, min: 1, max: 100 });
   const recommendations = await listRecommendations(c.env.DB, c.get("user"), mode, limit);
   return c.json({ recommendations });
+});
+
+app.get("/api/study-goal", async (c) => {
+  return c.json({ goal: await getActiveStudyGoal(c.env.DB, c.get("user").id) });
+});
+
+app.get("/api/learning-graphs/subjects", async (c) => {
+  const { results } = await c.env.DB.prepare(
+    `SELECT subject_key, topic, source_repository, source_commit, activated_at
+     FROM learning_graphs WHERE status = 'active'
+     ORDER BY subject_key, activated_at DESC`,
+  ).all();
+  return c.json({ subjects: results });
+});
+
+app.put("/api/study-goal", async (c) => {
+  const user = c.get("user");
+  const body = await readJson<Parameters<typeof upsertStudyGoal>[2]>(c.req.raw);
+  try {
+    const goal = await upsertStudyGoal(c.env.DB, user.id, body);
+    c.executionCtx.waitUntil(c.env.RECOMMENDATION_QUEUE.send({ userId: user.id, reason: "goal_changed" }));
+    return c.json({ goal });
+  } catch (error) {
+    fail(400, error instanceof Error ? error.message : "学習目標を保存できませんでした。");
+  }
+});
+
+app.get("/api/study-plans/current", async (c) => {
+  return c.json({ study_plan: await getCurrentStudyPlan(c.env.DB, c.get("user")) });
+});
+
+app.post("/api/study-plans", async (c) => {
+  try {
+    return c.json({ study_plan: await generateStudyPlan(c.env.DB, c.get("user")) }, 201);
+  } catch (error) {
+    fail(409, error instanceof Error ? error.message : "学習計画を生成できませんでした。");
+  }
+});
+
+app.patch("/api/study-plan-items/:id", async (c) => {
+  const body = await readJson<{ status?: "completed" | "skipped" }>(c.req.raw);
+  if (body.status !== "completed" && body.status !== "skipped") fail(400, "status must be completed or skipped");
+  const changed = await completeConceptPlanItem(c.env.DB, c.get("user").id, c.req.param("id"), body.status);
+  if (!changed) fail(404, "Study plan item not found");
+  return c.json({ id: c.req.param("id"), status: body.status });
 });
 
 app.get("/api/progress", async (c) => {
@@ -796,6 +791,32 @@ function extractAiText(response: unknown): string {
   return "回答を生成できませんでした。";
 }
 
+function externalHttpsUrl(value: string, field: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    fail(400, `${field} must be a valid URL`);
+  }
+  if (url.protocol !== "https:" || url.username || url.password) fail(400, `${field} must be a public HTTPS URL`);
+  const host = url.hostname.toLowerCase();
+  if (host === "localhost" || host.endsWith(".localhost") || host === "0.0.0.0" || host === "127.0.0.1" || host === "::1") {
+    fail(400, `${field} must be a public HTTPS URL`);
+  }
+  url.hash = "";
+  return url.toString();
+}
+
+function assertPublishableSource(sourceUrl: string, accessScope: string): void {
+  if (!sourceUrl) fail(400, "an active source requires a public PDF URL");
+  if (!['source_link_only', 'public_ready'].includes(accessScope)) {
+    fail(400, "an active source must be approved for public linking");
+  }
+  if (new URL(sourceUrl).hostname.toLowerCase() === "raw.githubusercontent.com") {
+    fail(400, "repository mirror URLs cannot be published as official sources");
+  }
+}
+
 async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", buffer);
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -863,12 +884,22 @@ export default {
   fetch: app.fetch,
   async queue(batch, env): Promise<void> {
     for (const message of batch.messages) {
-      const body = message.body as RecommendationQueueMessage;
-      await buildRecommendations(env.DB, body.userId, "normal");
-      await buildRecommendations(env.DB, body.userId, "review");
-      await buildRecommendations(env.DB, body.userId, "foundation");
-      await buildRecommendations(env.DB, body.userId, "challenge");
-      message.ack();
+      try {
+        const body = message.body as RecommendationQueueMessage;
+        await buildRecommendations(env.DB, body.userId, "normal");
+        await buildRecommendations(env.DB, body.userId, "review");
+        await buildRecommendations(env.DB, body.userId, "foundation");
+        await buildRecommendations(env.DB, body.userId, "challenge");
+        const user = await env.DB.prepare("SELECT * FROM users WHERE id = ? AND status = 'active'").bind(body.userId).first<AppUser>();
+        const goal = user ? await getActiveStudyGoal(env.DB, user.id) : null;
+        if (user && goal && await hasActiveLearningGraph(env.DB, goal.subject_key)) {
+          await generateStudyPlan(env.DB, user);
+        }
+        message.ack();
+      } catch (error) {
+        console.error(JSON.stringify({ level: "error", message: "Learning update failed", error: String(error) }));
+        message.retry({ delaySeconds: 60 });
+      }
     }
   },
 } satisfies ExportedHandler<Env, RecommendationQueueMessage>;

@@ -1,0 +1,23 @@
+{
+  "graph_id": "science_curated_v1",
+  "topic": "物理・化学・生命",
+  "created_at": "2026-08-13T00:00:00Z",
+  "meta": {
+    "source": "Curated for graduate-exam preparation using the KTaisei/KnowledgeGraph schema",
+    "review_status": "reviewed"
+  },
+  "nodes": [
+    { "node_id": "N01", "label": "物理学", "type": "FOUNDATIONAL", "layer": 0, "description": "単位、保存則、数式によるモデル化を物理現象へ適用する。", "prerequisites": [] },
+    { "node_id": "N02", "label": "化学", "type": "FOUNDATIONAL", "layer": 0, "description": "原子・分子、結合、反応を物質の性質と結び付ける。", "prerequisites": [] },
+    { "node_id": "N03", "label": "生命科学", "type": "FOUNDATIONAL", "layer": 0, "description": "細胞、遺伝、代謝を階層的な生命現象として理解する。", "prerequisites": [] },
+    { "node_id": "N04", "label": "力学", "type": "BASIC", "layer": 1, "description": "運動方程式、保存則、振動を使って力学系を解く。", "prerequisites": ["N01"] },
+    { "node_id": "N05", "label": "電磁気学", "type": "BASIC", "layer": 1, "description": "電場・磁場・電磁誘導を方程式と図で説明する。", "prerequisites": ["N01"] },
+    { "node_id": "N06", "label": "熱力学", "type": "BASIC", "layer": 1, "description": "状態量、熱、仕事、エントロピーから過程を評価する。", "prerequisites": ["N01", "N02"] },
+    { "node_id": "N07", "label": "量子力学", "type": "CORE", "layer": 2, "description": "状態、演算子、確率解釈を用いて微視的な系を扱う。", "prerequisites": ["N01"] },
+    { "node_id": "N08", "label": "有機化学", "type": "CORE", "layer": 2, "description": "構造、官能基、反応経路から有機分子の変化を追う。", "prerequisites": ["N02"] },
+    { "node_id": "N09", "label": "分子生物学", "type": "CORE", "layer": 2, "description": "DNA、RNA、タンパク質、遺伝子発現の関係を説明する。", "prerequisites": ["N02", "N03"] },
+    { "node_id": "N10", "label": "材料科学", "type": "CORE", "layer": 2, "description": "結晶構造、物性、材料選択を物理・化学の両面から扱う。", "prerequisites": ["N01", "N02"] },
+    { "node_id": "N11", "label": "応用科学", "type": "APPLICATION", "layer": 3, "description": "複数の科学分野を横断して、実験・設計・データの問題を解く。", "prerequisites": ["N04", "N05", "N06", "N08", "N09", "N10"] }
+  ],
+  "edges": []
+}

@@ -1,0 +1,13 @@
+{
+  "N01": ["con_calculus"],
+  "N02": ["con_linear_algebra"],
+  "N03": ["con_fourier_analysis"],
+  "N04": ["con_laplace_transform"],
+  "N05": ["con_electric_circuit"],
+  "N06": ["con_signal_processing"],
+  "N07": ["con_systems_control_extended"],
+  "N08": ["con_information_theory"],
+  "N09": ["con_cryptography_coding"],
+  "N10": ["con_network_communications"],
+  "N11": ["con_information_communication"]
+}

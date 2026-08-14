@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { academicFieldMatch, conceptJaccard, effectiveScore, nextMastery, recommendationModeEligible, recommendationModeScore, recommendationScore, similarProblemScore } from "../src/worker/scoring";
+import { academicFieldMatch, attemptInputError, conceptJaccard, effectiveScore, nextMastery, recommendationModeEligible, recommendationModeScore, recommendationScore, similarProblemScore } from "../src/worker/scoring";
 
 describe("scoring", () => {
   it("matches information engineering users with computing departments", () => {
     expect(academicFieldMatch("情報工学科", ["情報理工学系研究科", "コンピュータ科学"])).toBe(0.9);
     expect(academicFieldMatch("情報工学科", ["生命科学研究科", "生物学"])).toBe(0.15);
+    expect(academicFieldMatch("情報工学", ["グラフ理論", "論理"])).toBe(0.9);
+    expect(academicFieldMatch("情報工学", ["災害対応", "人間社会情報"])).toBe(0.15);
     expect(academicFieldMatch("情報工学科", ["生命医科学専攻", "外国語（英語）"])).toBe(0.15);
     expect(academicFieldMatch(null, ["情報科学研究科"])).toBe(0.5);
   });
@@ -70,5 +72,12 @@ describe("scoring", () => {
 
   it("computes concept Jaccard", () => {
     expect(conceptJaccard(["a", "b"], ["b", "c"])).toBeCloseTo(1 / 3);
+  });
+
+  it("validates study reflections before writing them", () => {
+    expect(attemptInputError({ problem_id: "prob_1", result: "partial", time_spent_minutes: 25, self_confidence: 2, note: "復習する", mistakes: [{ concept_id: "con_1", mistake_type: "concept_missing" }] })).toBeNull();
+    expect(attemptInputError({ problem_id: "prob_1", result: "not_checked" })).toContain("結果");
+    expect(attemptInputError({ problem_id: "prob_1", result: "correct", self_confidence: 7 })).toContain("自信度");
+    expect(attemptInputError({ problem_id: "prob_1", result: "wrong", mistakes: [{ mistake_type: "invalid" }] })).toContain("種類");
   });
 });

@@ -31,7 +31,7 @@ for (const path of tracked) {
   }
 }
 
-for (const required of ["LICENSE", "SECURITY.md", "docs/data-policy.md", "wrangler.production.example.jsonc"]) {
+for (const required of ["LICENSE", "THIRD_PARTY_NOTICES.md", "SECURITY.md", "docs/data-policy.md", "docs/knowledge-graph-integration.md", "wrangler.production.example.jsonc"]) {
   if (!tracked.includes(required)) failures.push(`${required}: required public-release file is missing`);
 }
 

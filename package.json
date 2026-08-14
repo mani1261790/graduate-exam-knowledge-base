@@ -34,10 +34,8 @@
     "agent:review-import:local": "node scripts/import-agent-reviews.mjs --apply-local",
     "agent:review-import:remote": "node scripts/import-agent-reviews.mjs --apply-remote",
     "agent:review-import:production": "WRANGLER_CONFIG=wrangler.production.jsonc node scripts/import-agent-reviews.mjs --apply-remote",
-    "r2:create:production": "wrangler r2 bucket create graduate-exam-assets --location apac --config wrangler.production.jsonc",
-    "r2:recover:production": "WRANGLER_CONFIG=wrangler.production.jsonc node scripts/sync-source-assets-r2.mjs --recover-missing --apply-remote --dry-run",
-    "r2:sync:production": "WRANGLER_CONFIG=wrangler.production.jsonc node scripts/sync-source-assets-r2.mjs",
-    "r2:sync:dry-run": "node scripts/sync-source-assets-r2.mjs --dry-run",
+    "knowledge-graph:fetch": "node scripts/fetch-knowledge-graph.mjs",
+    "knowledge-graph:import": "node scripts/import-knowledge-graph.mjs",
     "data:verify-academic": "node scripts/verify-academic-metadata.mjs",
     "cf-types": "wrangler types"
   },
@@ -45,7 +43,6 @@
     "@vitejs/plugin-react": "^4.3.4",
     "hono": "^4.6.16",
     "lucide-react": "^0.468.0",
-    "pdfjs-dist": "^6.1.200",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },

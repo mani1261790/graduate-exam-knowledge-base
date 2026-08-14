@@ -31,6 +31,9 @@ export interface ProblemListItem {
   page_start?: number | null;
   page_end?: number | null;
   source_url?: string | null;
+  publisher_page_url?: string | null;
+  pdf_display_mode?: "embed" | "external_only";
+  source_status?: "active" | "unavailable" | "needs_review";
   concepts: ConceptSummary[];
 }
 
@@ -80,5 +83,5 @@ export interface AttemptInput {
 
 export interface RecommendationQueueMessage {
   userId: string;
-  reason: "attempt_saved" | "manual";
+  reason: "attempt_saved" | "manual" | "goal_changed";
 }

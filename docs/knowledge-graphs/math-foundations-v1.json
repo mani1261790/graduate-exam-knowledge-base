@@ -1,0 +1,24 @@
+{
+  "graph_id": "math_foundations_curated_v1",
+  "topic": "数学基礎と数理的手法",
+  "created_at": "2026-08-13T00:00:00Z",
+  "meta": {
+    "source": "Curated for graduate-exam preparation using the KTaisei/KnowledgeGraph schema",
+    "review_status": "reviewed"
+  },
+  "nodes": [
+    { "node_id": "N01", "label": "数学基礎", "type": "FOUNDATIONAL", "layer": 0, "description": "関数、数列、方程式、数え上げを通じて、院試数学を解くための記法と計算を整える。", "prerequisites": [] },
+    { "node_id": "N02", "label": "微分積分", "type": "FOUNDATIONAL", "layer": 0, "description": "極限、微分、積分を使って量の変化と面積・累積を扱う。", "prerequisites": ["N01"] },
+    { "node_id": "N03", "label": "線形代数", "type": "FOUNDATIONAL", "layer": 0, "description": "行列、ベクトル空間、連立方程式を用いて線形な構造を表す。", "prerequisites": ["N01"] },
+    { "node_id": "N04", "label": "確率", "type": "FOUNDATIONAL", "layer": 0, "description": "確率変数、期待値、分布を用いて不確実性を定量化する。", "prerequisites": ["N01"] },
+    { "node_id": "N05", "label": "多変数微分積分", "type": "BASIC", "layer": 1, "description": "偏微分、勾配、重積分を用いて多変数の関数を解析する。", "prerequisites": ["N02"] },
+    { "node_id": "N06", "label": "常微分方程式", "type": "BASIC", "layer": 1, "description": "変化率と初期条件から、時間発展する系を解く。", "prerequisites": ["N02"] },
+    { "node_id": "N07", "label": "固有値と対角化", "type": "BASIC", "layer": 1, "description": "固有値・固有ベクトルと対角化で線形変換の性質を読み解く。", "prerequisites": ["N03"] },
+    { "node_id": "N08", "label": "統計", "type": "BASIC", "layer": 1, "description": "標本、推定、検定、回帰を使ってデータから結論を導く。", "prerequisites": ["N04"] },
+    { "node_id": "N09", "label": "フーリエ解析", "type": "CORE", "layer": 2, "description": "周期関数と周波数成分をフーリエ級数・変換で扱う。", "prerequisites": ["N02", "N03"] },
+    { "node_id": "N10", "label": "数値計算", "type": "CORE", "layer": 2, "description": "近似、誤差、反復法を踏まえて数値的に解を求める。", "prerequisites": ["N02", "N03"] },
+    { "node_id": "N11", "label": "最適化", "type": "CORE", "layer": 2, "description": "目的関数と制約を整理し、微分と線形代数を使って最適解を求める。", "prerequisites": ["N03", "N05"] },
+    { "node_id": "N12", "label": "数理モデリング", "type": "APPLICATION", "layer": 3, "description": "微分方程式、確率、線形代数を組み合わせて実問題を数式で説明する。", "prerequisites": ["N06", "N07", "N08", "N10"] }
+  ],
+  "edges": []
+}

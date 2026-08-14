@@ -1,37 +1,43 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import * as pdfjsLib from "pdfjs-dist";
-import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
 import {
   BarChart3,
   BookOpen,
+  CircleAlert,
   CheckCircle2,
+  ChevronLeft,
   ChevronRight,
   ClipboardList,
   Database,
   ExternalLink,
+  FileCheck2,
   FilePlus2,
+  Filter,
   GitBranch,
   GraduationCap,
   Home,
+  Link2,
   LockKeyhole,
   LogOut,
   Play,
+  RefreshCw,
   Search,
   Settings,
+  ShieldCheck,
   Target,
   X,
 } from "lucide-react";
 import { api } from "./api";
-import type { Concept, Problem, ProblemDetail, Recommendation, SourceDocument, User } from "./types";
+import type { Concept, LearningGraphSubject, Problem, ProblemDetail, Recommendation, SourceDocument, SourceStats, StudyGoal, StudyPlanResponse, User } from "./types";
 import { SolveWorkspacePage } from "./SolveWorkspace";
 import "./styles.css";
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+type View = "home" | "concepts" | "study-plan" | "admin";
 
-const PDFJS_ASSET_BASE = "/pdfjs";
-
-type View = "home" | "concepts" | "recommendations" | "admin";
+function initialView(): View {
+  const candidate = new URLSearchParams(window.location.search).get("view");
+  return candidate === "concepts" || candidate === "study-plan" || candidate === "admin" ? candidate : "home";
+}
 
 const STATUS_LABELS: Record<string, string> = {
   reviewed: "確認済み",
@@ -41,19 +47,31 @@ const STATUS_LABELS: Record<string, string> = {
   deprecated: "非表示",
 };
 
-const MODE_LABELS: Record<string, string> = {
-  normal: "今日の演習",
-  review: "復習",
-  foundation: "基礎固め",
-  challenge: "挑戦",
-};
-
 const ACCESS_SCOPE_LABELS: Record<string, string> = {
   internal_only: "内部利用",
   source_link_only: "リンク参照",
   public_ready: "公開可",
   restricted: "制限あり",
 };
+
+const SOURCE_STATUS_LABELS: Record<SourceDocument["source_status"], string> = {
+  active: "公開中",
+  needs_review: "確認待ち",
+  unavailable: "利用停止",
+};
+
+const PDF_DISPLAY_LABELS: Record<SourceDocument["pdf_display_mode"], string> = {
+  embed: "サイト内表示",
+  external_only: "別タブ表示",
+};
+
+function canManageSources(user: User | null): boolean {
+  return Boolean(user && user.role !== "member");
+}
+
+function canReviewSources(user: User): boolean {
+  return user.role === "reviewer" || user.role === "admin";
+}
 
 const SUBJECT_GROUPS = [
   { id: "math", label: "数学基礎", keywords: ["数学", "微分", "積分", "線形", "行列", "確率", "統計", "解析", "代数", "幾何", "位相", "固有", "級数", "関数", "最適化", "数値", "微分方程式", "ラプラス方程式"] },
@@ -96,34 +114,14 @@ function labelOf(labels: Record<string, string>, value: string | null | undefine
   return labels[value] ?? value;
 }
 
-function recommendationReason(reason: string) {
-  return reason
-    .replaceAll("弱点Concept", "苦手分野")
-    .replaceAll("Concept", "分野")
-    .replaceAll("通常推薦", "今日の演習")
-    .replaceAll("復習期限", "復習時期");
-}
-
 function pdfPageUrl(url: string | null | undefined, page?: number | null) {
   if (!url) return "";
   const [base] = url.split("#");
   return page ? `${base}#page=${page}` : base;
 }
 
-function rawProblemPdfUrl(problemId: string) {
-  return `/api/problem-pdf?id=${encodeURIComponent(problemId)}`;
-}
-
 function problemPdfUrl(problem: Pick<Problem, "id" | "source_url" | "page_start">) {
-  if (!problem.source_url) return "";
-  return rawProblemPdfUrl(problem.id);
-}
-
-function problemPdfOpenUrl(problem: Pick<Problem, "id" | "source_url" | "page_start">) {
-  if (!problem.source_url) return "";
-  const params = new URLSearchParams({ pdf: "1", id: problem.id });
-  if (problem.page_start) params.set("page", String(problem.page_start));
-  return `/?${params.toString()}`;
+  return pdfPageUrl(problem.source_url, problem.page_start);
 }
 
 function pageLabel(problem: Pick<Problem, "page_start" | "page_end">) {
@@ -152,7 +150,7 @@ function conceptMatchesGroup(concept: Concept, groupId: SubjectGroupId) {
 }
 
 function App() {
-  const [view, setView] = useState<View>("home");
+  const [view, setView] = useState<View>(initialView);
   const [user, setUser] = useState<User | null>(null);
   const [query, setQuery] = useState("");
   const [conceptQuery, setConceptQuery] = useState("");
@@ -163,9 +161,11 @@ function App() {
   const [selectedProblem, setSelectedProblem] = useState<ProblemDetail | null>(null);
   const [problemModalOpen, setProblemModalOpen] = useState(false);
   const [searchResultsOpen, setSearchResultsOpen] = useState(false);
+  const [studyGoal, setStudyGoal] = useState<StudyGoal | null>(null);
+  const [studyPlan, setStudyPlan] = useState<StudyPlanResponse | null>(null);
+  const [learningGraphSubjects, setLearningGraphSubjects] = useState<LearningGraphSubject[]>([]);
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
   const [progress, setProgress] = useState<Array<Concept & { evidence_count: number; review_due_at: string | null }>>([]);
-  const [mode, setMode] = useState("normal");
   const [busy, setBusy] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
   const [authRequired, setAuthRequired] = useState(false);
@@ -174,25 +174,28 @@ function App() {
     void bootstrap();
   }, []);
 
-  useEffect(() => {
-    if (view === "recommendations") void loadRecommendations(mode);
-  }, [view, mode]);
-
   async function bootstrap() {
     try {
       setBusy(true);
       const session = await api.session();
-      const [conceptData, problemData, recommendationData, progressData] = await Promise.all([
+      const [conceptData, problemData, goalData, planData, progressData, graphSubjectData, recommendationData] = await Promise.all([
         api.concepts(),
         api.problems(new URLSearchParams()),
-        api.recommendations("normal"),
+        api.studyGoal(),
+        api.currentStudyPlan(),
         api.progress(),
+        api.learningGraphSubjects(),
+        api.recommendations("normal").catch(() => ({ recommendations: [] as Recommendation[] })),
       ]);
       setUser(session.user);
       setConcepts(conceptData.concepts);
       setProblems(problemData.problems);
-      setRecommendations(recommendationData.recommendations);
+      setStudyGoal(goalData.goal);
+      setStudyPlan(planData.study_plan);
       setProgress(progressData.progress);
+      setLearningGraphSubjects(graphSubjectData.subjects);
+      setRecommendations(recommendationData.recommendations);
+      if (view === "admin" && session.user.role === "member") setView("home");
     } catch (error) {
       const message = error instanceof Error ? error.message : "初期化に失敗しました";
       if (message.includes("Authentication required")) {
@@ -215,6 +218,13 @@ function App() {
     setSearchResultsOpen(true);
   }
 
+  async function browseStudyPlanConcept(conceptId: string) {
+    const data = await api.concept(conceptId);
+    setSelectedConcept(data.concept);
+    setProblems(data.concept.problems);
+    setView("concepts");
+  }
+
   async function selectProblem(id: string) {
     const { problem } = await api.problem(id);
     setSelectedProblem(problem);
@@ -223,11 +233,6 @@ function App() {
   async function openProblem(id: string) {
     await selectProblem(id);
     setProblemModalOpen(true);
-  }
-
-  async function loadRecommendations(nextMode = mode) {
-    const { recommendations: next } = await api.recommendations(nextMode);
-    setRecommendations(next);
   }
 
   async function loadConcepts(q = conceptQuery) {
@@ -247,6 +252,13 @@ function App() {
     setUser(null);
     setAuthRequired(true);
     setView("home");
+  }
+
+  async function updateDepartment(department: string) {
+    const profile = await api.updateProfile({ department });
+    setUser(profile.user);
+    const recommendationData = await api.recommendations("normal");
+    setRecommendations(recommendationData.recommendations);
   }
 
   const weakConcepts = useMemo(
@@ -277,8 +289,8 @@ function App() {
         <nav>
           <NavButton active={view === "home"} icon={<Home />} label="ホーム" onClick={() => setView("home")} />
           <NavButton active={view === "concepts"} icon={<GitBranch />} label="分野から探す" onClick={() => setView("concepts")} />
-          <NavButton active={view === "recommendations"} icon={<Target />} label="おすすめ演習" onClick={() => setView("recommendations")} />
-          <NavButton active={view === "admin"} icon={<Settings />} label="資料管理" onClick={() => setView("admin")} />
+          <NavButton active={view === "study-plan"} icon={<Target />} label="学習計画" onClick={() => setView("study-plan")} />
+          {canManageSources(user) ? <NavButton active={view === "admin"} icon={<Settings />} label="資料管理" onClick={() => setView("admin")} /> : null}
         </nav>
       </aside> : null}
 
@@ -321,9 +333,11 @@ function App() {
         {!authRequired && view === "home" && (
           <Dashboard
             user={user}
-            recommendations={recommendations}
+            studyPlan={studyPlan}
             weakConcepts={weakConcepts}
             progress={progress}
+            initialRecommendations={recommendations}
+            onDepartment={updateDepartment}
             onProblem={openProblem}
             onView={setView}
           />
@@ -354,16 +368,19 @@ function App() {
           />
         )}
 
-        {!authRequired && view === "recommendations" && (
-          <RecommendationView
-            mode={mode}
-            recommendations={recommendations}
-            onMode={setMode}
+        {!authRequired && view === "study-plan" && (
+          <StudyPlanView
+            goal={studyGoal}
+            studyPlan={studyPlan}
+            availableSubjects={learningGraphSubjects}
+            onGoal={setStudyGoal}
+            onPlan={setStudyPlan}
             onSelect={openProblem}
+            onBrowseConcept={browseStudyPlanConcept}
           />
         )}
 
-        {!authRequired && view === "admin" && <AdminPanel onCreated={bootstrap} />}
+        {!authRequired && view === "admin" && user && canManageSources(user) && <AdminPanel user={user} onCreated={bootstrap} />}
         {problemModalOpen && selectedProblem ? (
           <ProblemModal
             problem={selectedProblem}
@@ -411,7 +428,7 @@ function StandalonePdfPage() {
     };
   }, [problemId]);
 
-  const pdfUrl = problem ? problemPdfUrl(problem) : problemId ? rawProblemPdfUrl(problemId) : "";
+  const pdfUrl = problem ? problemPdfUrl(problem) : "";
   const originalPdfUrl = problem?.source_url ? pdfPageUrl(problem.source_url, pageNumber) : "";
 
   return (
@@ -429,9 +446,7 @@ function StandalonePdfPage() {
       </header>
       {busy ? <div className="loading">PDF情報を読み込んでいます...</div> : null}
       {error ? <div className="notice">{error}</div> : null}
-      {pdfUrl && !busy && !error ? (
-        <BlobPdfViewer sourceUrl={pdfUrl} pageNumber={pageNumber} fallbackUrl={originalPdfUrl || pdfUrl} title={`${problem?.problem_label ?? "問題"} PDF`} />
-      ) : null}
+      {pdfUrl && problem && !busy && !error ? <ExternalPdfViewer problem={problem} pageNumber={pageNumber} /> : null}
     </main>
   );
 }
@@ -513,19 +528,73 @@ function BrandIcon() {
 
 function Dashboard({
   user,
-  recommendations,
+  studyPlan,
   weakConcepts,
   progress,
+  initialRecommendations,
+  onDepartment,
   onProblem,
   onView,
 }: {
   user: User | null;
-  recommendations: Recommendation[];
+  studyPlan: StudyPlanResponse | null;
   weakConcepts: Concept[];
   progress: Array<Concept & { evidence_count: number; review_due_at: string | null }>;
+  initialRecommendations: Recommendation[];
+  onDepartment: (department: string) => Promise<void>;
   onProblem: (id: string) => Promise<void>;
   onView: (view: View) => void;
 }) {
+  const [recommendationMode, setRecommendationMode] = useState<"normal" | "review" | "foundation" | "challenge">("normal");
+  const [recommendationItems, setRecommendationItems] = useState(initialRecommendations);
+  const [recommendationBusy, setRecommendationBusy] = useState(false);
+  const [recommendationError, setRecommendationError] = useState<string | null>(null);
+  const [departmentEditing, setDepartmentEditing] = useState(!user?.department);
+  const [departmentDraft, setDepartmentDraft] = useState(user?.department ?? "");
+  const [departmentBusy, setDepartmentBusy] = useState(false);
+  const [departmentError, setDepartmentError] = useState<string | null>(null);
+  const recommendationModes = [
+    { id: "normal", label: "バランス" },
+    { id: "review", label: "復習" },
+    { id: "foundation", label: "基礎" },
+    { id: "challenge", label: "発展" },
+  ] as const;
+
+  useEffect(() => setRecommendationItems(initialRecommendations), [initialRecommendations]);
+
+  async function changeRecommendationMode(mode: typeof recommendationMode) {
+    setRecommendationMode(mode);
+    setRecommendationBusy(true);
+    setRecommendationError(null);
+    try {
+      const response = await api.recommendations(mode);
+      setRecommendationItems(response.recommendations);
+    } catch (error) {
+      setRecommendationError(error instanceof Error ? error.message : "おすすめ問題を読み込めませんでした。");
+    } finally {
+      setRecommendationBusy(false);
+    }
+  }
+
+  async function saveDepartment(event: React.FormEvent) {
+    event.preventDefault();
+    if (!departmentDraft.trim()) {
+      setDepartmentError("学習したい分野を入力してください。");
+      return;
+    }
+    setDepartmentBusy(true);
+    setDepartmentError(null);
+    try {
+      await onDepartment(departmentDraft.trim());
+      setRecommendationMode("normal");
+      setDepartmentEditing(false);
+    } catch (error) {
+      setDepartmentError(error instanceof Error ? error.message : "学習分野を保存できませんでした。");
+    } finally {
+      setDepartmentBusy(false);
+    }
+  }
+
   return (
     <section className="dashboard-grid">
       <div className="dashboard-welcome span-2">
@@ -535,32 +604,67 @@ function Dashboard({
           <p>
             {user?.department
               ? `${user.department}に近い出題分野と、これまでの学習記録から優先問題を選んでいます。`
-              : "所属を登録すると、専門分野に近い問題を優先して提案できます。"}
+              : "学習したい分野を登録すると、近い問題を優先して提案できます。"}
           </p>
         </div>
-        <div className={user?.department ? "department-card" : "department-card unregistered"}>
-          <GraduationCap />
-          <span>現在の所属</span>
-          <strong>{user?.department ?? "未登録"}</strong>
-        </div>
+        {departmentEditing ? (
+          <form className="department-editor" onSubmit={saveDepartment}>
+            <label htmlFor="learning-field"><span>学習したい分野</span><input id="learning-field" value={departmentDraft} onChange={(event) => setDepartmentDraft(event.target.value)} maxLength={100} placeholder="例：情報工学、数学、電気電子" autoFocus /></label>
+            <small>おすすめ問題の優先順位に使います。</small>
+            {departmentError ? <p role="alert">{departmentError}</p> : null}
+            <div><button type="submit" disabled={departmentBusy}>{departmentBusy ? "保存中" : "保存"}</button>{user?.department ? <button type="button" className="secondary-action" onClick={() => { setDepartmentDraft(user.department ?? ""); setDepartmentEditing(false); setDepartmentError(null); }}>キャンセル</button> : null}</div>
+          </form>
+        ) : (
+          <button className="department-card" onClick={() => setDepartmentEditing(true)} title="学習分野を変更">
+            <GraduationCap />
+            <span>学習分野</span>
+            <strong>{user?.department}</strong>
+            <small>変更</small>
+          </button>
+        )}
       </div>
       <div className="panel span-2">
-        <PanelTitle icon={<Target />} title={user?.department ? `${user.department}のあなたにおすすめ` : "今日解くとよい問題"} action="すべて見る" onAction={() => onView("recommendations")} />
+        <PanelTitle icon={<Target />} title="今日の学習計画" action="計画を見る" onAction={() => onView("study-plan")} />
         <div className="recommendation-list">
-          {recommendations.length === 0 ? <span className="muted dashboard-empty">条件に合う問題を準備中です。</span> : null}
-          {recommendations.slice(0, 4).map((problem) => (
+          {!studyPlan ? <span className="muted dashboard-empty">学習目標を設定すると、ナレッジグラフから今日の計画を作成します。</span> : null}
+          {studyPlan && studyPlan.today.length === 0 ? <span className="muted dashboard-empty">今日の項目は完了しました。計画画面で次の予定を確認できます。</span> : null}
+          {studyPlan?.today.slice(0, 4).map((item) => item.problem ? (
+            <button key={item.id} className="recommendation-row" onClick={() => void onProblem(item.problem!.id)}>
+              <div>
+                <strong>{item.node_label}: {item.problem.university} {item.problem.problem_label}</strong>
+                <span>{problemSummary(item.problem)}</span>
+                <span className="recommendation-reasons"><em>{item.reason}</em></span>
+              </div>
+              {item.problem.completed ? <CompletedMark /> : null}
+            </button>
+          ) : <div key={item.id} className="recommendation-row concept-task"><div><strong>{item.node_label}</strong><span>{item.reason}</span></div></div>)}
+        </div>
+      </div>
+      <div className="panel span-2 recommendation-panel">
+        <div className="panel-title recommendation-panel-title">
+          <div><BookOpen /><h2>おすすめ演習</h2></div>
+          <div className="recommendation-modes" role="group" aria-label="おすすめの目的">
+            {recommendationModes.map((mode) => (
+              <button key={mode.id} className={recommendationMode === mode.id ? "active" : ""} onClick={() => void changeRecommendationMode(mode.id)} disabled={recommendationBusy}>{mode.label}</button>
+            ))}
+          </div>
+        </div>
+        <p className="recommendation-help">学習計画の対象外でも、公開済みの過去問から目的に合う問題を選べます。</p>
+        {recommendationError ? <p className="form-status error recommendation-error" role="alert">{recommendationError}</p> : null}
+        <div className="recommendation-list" aria-busy={recommendationBusy}>
+          {recommendationBusy ? <span className="muted dashboard-empty">おすすめ問題を選び直しています...</span> : null}
+          {!recommendationBusy && recommendationItems.length === 0 ? <span className="muted dashboard-empty">この条件に合う問題はまだありません。</span> : null}
+          {!recommendationBusy ? recommendationItems.slice(0, 6).map((problem) => (
             <button key={problem.id} className="recommendation-row" onClick={() => void onProblem(problem.id)}>
               <div>
                 <strong>{problem.university} {problem.exam_year} {problem.problem_label}</strong>
                 <span>{problemSummary(problem)}</span>
-                <span className="recommendation-reasons">
-                  {problem.reasons.slice(0, 2).map((reason) => <em key={reason}>{recommendationReason(reason)}</em>)}
-                </span>
+                <span className="recommendation-reasons">{problem.reasons.slice(0, 3).map((reason) => <em key={reason}>{reason}</em>)}</span>
               </div>
-              {problem.completed ? <CompletedMark /> : null}
-              <meter min={0} max={1} value={problem.score} />
+              <span className="recommendation-difficulty">難易度 {problem.difficulty}<small>{problem.estimated_minutes}分</small></span>
+              {problem.completed ? <CompletedMark /> : <span className="recommendation-start">問題を見る</span>}
             </button>
-          ))}
+          )) : null}
         </div>
       </div>
       <div className="panel">
@@ -735,9 +839,6 @@ function ProblemPreviewPanel({
   }, [editingMemo, problem?.explanation_text]);
 
   if (!problem) return <div className="panel detail-panel empty">問題を選択してください。</div>;
-  const pdfUrl = problemPdfUrl(problem);
-  const pdfOpenUrl = problemPdfOpenUrl(problem);
-  const pdfPageNumber = problem.page_start ?? 1;
   const editable = canEditProblem(user);
   const explanationText = memoDraft.trim();
 
@@ -776,8 +877,8 @@ function ProblemPreviewPanel({
             <span>{pageLabel(problem)}を開いています</span>
           </div>
         </div>
-        {pdfUrl ? (
-          <BlobPdfViewer sourceUrl={pdfUrl} pageNumber={pdfPageNumber} fallbackUrl={pdfOpenUrl} title={`${problem.problem_label} PDF`} />
+        {problem.source_url ? (
+          <ExternalPdfViewer problem={problem} pageNumber={problem.page_start ?? 1} compact />
         ) : (
           <div className="pdf-missing">この問題にはPDFリンクがまだ登録されていません。</div>
         )}
@@ -865,6 +966,11 @@ function ProblemPreviewPanel({
                 <span>{new Date(attempt.created_at).toLocaleDateString("ja-JP")}</span>
               </div>
               <span>{attempt.time_spent_minutes == null ? "時間未記録" : `${attempt.time_spent_minutes}分`}</span>
+              <div className="attempt-signals">
+                {attempt.self_confidence ? <span>自信度 {attempt.self_confidence}/5</span> : null}
+                {attempt.used_hint ? <span>ヒント使用</span> : null}
+                {attempt.looked_solution ? <span>解答参照</span> : null}
+              </div>
               {attempt.note ? <p>{attempt.note}</p> : null}
             </article>
           ))}
@@ -874,88 +980,24 @@ function ProblemPreviewPanel({
   );
 }
 
-function BlobPdfViewer({ sourceUrl, pageNumber = 1, fallbackUrl, title }: { sourceUrl: string; pageNumber?: number; fallbackUrl?: string; title: string }) {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    let cancelled = false;
-    let loadingTask: pdfjsLib.PDFDocumentLoadingTask | null = null;
-    let pdfDocument: pdfjsLib.PDFDocumentProxy | null = null;
-    let renderTask: pdfjsLib.RenderTask | null = null;
-
-    async function renderPdf() {
-      setLoading(true);
-      setError(null);
-      try {
-        loadingTask = pdfjsLib.getDocument({
-          url: sourceUrl,
-          cMapPacked: true,
-          cMapUrl: `${PDFJS_ASSET_BASE}/cmaps/`,
-          iccUrl: `${PDFJS_ASSET_BASE}/iccs/`,
-          standardFontDataUrl: `${PDFJS_ASSET_BASE}/standard_fonts/`,
-          wasmUrl: `${PDFJS_ASSET_BASE}/wasm/`,
-          rangeChunkSize: 256 * 1024,
-        });
-        pdfDocument = await loadingTask.promise;
-        if (cancelled) return;
-
-        const visiblePageNumber = Math.max(1, Math.min(pdfDocument.numPages, pageNumber));
-        const page = await pdfDocument.getPage(visiblePageNumber);
-        if (cancelled) return;
-
-        const canvas = canvasRef.current;
-        const context = canvas?.getContext("2d");
-        if (!canvas || !context) throw new Error("PDF canvas is not available");
-
-        const baseViewport = page.getViewport({ scale: 1 });
-        const availableWidth = Math.max(320, (canvas.parentElement?.clientWidth ?? 960) - 32);
-        const scale = Math.min(1.7, Math.max(0.9, availableWidth / baseViewport.width));
-        const deviceScale = window.devicePixelRatio || 1;
-        const viewport = page.getViewport({ scale });
-        const renderViewport = page.getViewport({ scale: scale * deviceScale });
-
-        canvas.width = Math.floor(renderViewport.width);
-        canvas.height = Math.floor(renderViewport.height);
-        canvas.style.width = `${Math.floor(viewport.width)}px`;
-        canvas.style.height = `${Math.floor(viewport.height)}px`;
-        context.setTransform(1, 0, 0, 1, 0, 0);
-        context.clearRect(0, 0, canvas.width, canvas.height);
-
-        renderTask = page.render({ canvas, canvasContext: context, viewport: renderViewport });
-        await renderTask.promise;
-      } catch (renderError) {
-        console.error("PDF preview failed", renderError);
-        if (!cancelled) setError("PDFを表示できませんでした");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    }
-
-    void renderPdf();
-    return () => {
-      cancelled = true;
-      renderTask?.cancel();
-      void loadingTask?.destroy();
-    };
-  }, [pageNumber, sourceUrl]);
-
-  if (error) {
+function ExternalPdfViewer({ problem, pageNumber, compact = false }: { problem: Problem; pageNumber: number; compact?: boolean }) {
+  const sourceUrl = pdfPageUrl(problem.source_url, pageNumber);
+  if (!sourceUrl) return <div className="pdf-missing">公開元PDFが登録されていません。</div>;
+  if (problem.pdf_display_mode !== "embed") {
     return (
       <div className="pdf-viewer-shell">
         <div className="pdf-fallback-panel">
-          <strong>{error}</strong>
-          <a href={fallbackUrl ?? sourceUrl} target="_blank" rel="noreferrer"><ExternalLink />別タブで開く</a>
+          <strong>このPDFはサイト内表示に対応していません。</strong>
+          <span>{pageLabel(problem)}を確認してください。</span>
+          <a href={sourceUrl} target="_blank" rel="noopener noreferrer"><ExternalLink />公式PDFを別タブで開く</a>
         </div>
       </div>
     );
   }
-
   return (
-    <div className="pdf-viewer-shell">
-      {loading ? <div className="pdf-state">PDFを読み込んでいます。</div> : null}
-      <canvas ref={canvasRef} className="pdf-canvas" aria-label={title} />
+    <div className={`pdf-viewer-shell external ${compact ? "compact" : ""}`}>
+      <iframe className="pdf-viewer" src={sourceUrl} title={`${problem.problem_label} 公式PDF`} />
+      <div className="pdf-embed-help">表示されない場合は <a href={sourceUrl} target="_blank" rel="noopener noreferrer">公式PDFを別タブで開く</a></div>
     </div>
   );
 }
@@ -1045,42 +1087,178 @@ function ConceptExplorer({
   );
 }
 
-function RecommendationView({
-  mode,
-  recommendations,
-  onMode,
-  onSelect,
-}: {
-  mode: string;
-  recommendations: Recommendation[];
-  onMode: (mode: string) => void;
+function StudyPlanView({ goal, studyPlan, availableSubjects, onGoal, onPlan, onSelect, onBrowseConcept }: {
+  goal: StudyGoal | null;
+  studyPlan: StudyPlanResponse | null;
+  availableSubjects: LearningGraphSubject[];
+  onGoal: (goal: StudyGoal) => void;
+  onPlan: (plan: StudyPlanResponse | null) => void;
   onSelect: (id: string) => Promise<void>;
+  onBrowseConcept: (id: string) => Promise<void>;
 }) {
+  const [editing, setEditing] = useState(!goal);
+  const [goalText, setGoalText] = useState(goal?.goal_text ?? "大学院入試に向けて基礎から応用まで学びたい");
+  const [subjectKey, setSubjectKey] = useState(goal?.subject_key ?? "algorithms");
+  const [targetUniversity, setTargetUniversity] = useState(goal?.target_university ?? "");
+  const [targetGraduateSchool, setTargetGraduateSchool] = useState(goal?.target_graduate_school ?? "");
+  const [targetDate, setTargetDate] = useState(goal?.target_date ?? "");
+  const [sessionsPerWeek, setSessionsPerWeek] = useState(String(goal?.sessions_per_week ?? 5));
+  const [minutesPerSession, setMinutesPerSession] = useState(String(goal?.minutes_per_session ?? 45));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const availableSubjectKeys = useMemo(() => new Set(availableSubjects.map((subject) => subject.subject_key)), [availableSubjects]);
+  const subjectReady = availableSubjectKeys.has(subjectKey);
+  const selectedSubjectLabel = SUBJECT_GROUPS.find((subject) => subject.id === subjectKey)?.label ?? subjectKey;
+  const availableSubjectLabels = SUBJECT_GROUPS
+    .filter((subject) => availableSubjectKeys.has(subject.id))
+    .map((subject) => subject.label);
+  const pendingPlanItems = studyPlan?.items.filter((item) => item.status === "pending") ?? [];
+  const completedPlanItemCount = studyPlan?.items.filter((item) => item.status !== "pending").length ?? 0;
+
+  useEffect(() => {
+    if (!goal) return;
+    setGoalText(goal.goal_text);
+    setSubjectKey(goal.subject_key);
+    setTargetUniversity(goal.target_university ?? "");
+    setTargetGraduateSchool(goal.target_graduate_school ?? "");
+    setTargetDate(goal.target_date ?? "");
+    setSessionsPerWeek(String(goal.sessions_per_week));
+    setMinutesPerSession(String(goal.minutes_per_session));
+    setEditing(false);
+  }, [goal?.id]);
+
+  async function saveAndGenerate(event: React.FormEvent) {
+    event.preventDefault();
+    if (!subjectReady) {
+      setError(`「${selectedSubjectLabel}」の学習グラフは準備中です。利用可能な科目を選んでください。`);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const { goal: savedGoal } = await api.saveStudyGoal({
+        goal_text: goalText,
+        subject_key: subjectKey,
+        target_university: targetUniversity || null,
+        target_graduate_school: targetGraduateSchool || null,
+        target_date: targetDate || null,
+        sessions_per_week: Number(sessionsPerWeek),
+        minutes_per_session: Number(minutesPerSession),
+      });
+      onGoal(savedGoal);
+      const { study_plan: nextPlan } = await api.generateStudyPlan();
+      onPlan(nextPlan);
+      setEditing(false);
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "学習計画を作成できませんでした。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function refreshPlan() {
+    setBusy(true);
+    setError(null);
+    try {
+      const { study_plan: nextPlan } = await api.generateStudyPlan();
+      onPlan(nextPlan);
+    } catch (refreshError) {
+      setError(refreshError instanceof Error ? refreshError.message : "学習計画を更新できませんでした。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function finishConceptItem(id: string) {
+    await api.completeStudyPlanItem(id, "completed");
+    const { study_plan: nextPlan } = await api.currentStudyPlan();
+    onPlan(nextPlan);
+  }
+
   return (
-    <section className="recommendation-page">
-      <div className="panel">
-        <PanelTitle icon={<Target />} title="おすすめ演習" />
-        <div className="segmented">
-          {["normal", "review", "foundation", "challenge"].map((item) => (
-            <button key={item} className={mode === item ? "active" : ""} onClick={() => onMode(item)}>{labelOf(MODE_LABELS, item)}</button>
-          ))}
+    <section className="study-plan-page">
+      <div className="panel study-plan-head">
+        <div>
+          <span className="dashboard-eyebrow">KNOWLEDGE GRAPH STUDY PLAN</span>
+          <h1>{studyPlan?.plan.topic ?? "学習計画"}</h1>
+          <p>{goal?.goal_text ?? "目標を設定すると、前提関係と学習履歴から計画を作成します。"}</p>
         </div>
-        <div className="problem-list">
-          {recommendations.map((problem) => (
-            <button key={problem.id} className="problem-row" onClick={() => void onSelect(problem.id)}>
-              <div className="row-meta">
-                <span>{problem.university}</span>
-                <span>おすすめ度 {Math.round(problem.score * 100)}</span>
-                <span>{pageLabel(problem)}</span>
-              </div>
-              <strong>{problem.subject_raw ?? problem.problem_label}</strong>
-              <span className="problem-summary">{problemSummary(problem)}</span>
-              <span className="muted">{problem.reasons.map(recommendationReason).join(" / ")}</span>
-              {problem.completed ? <CompletedMark /> : null}
-            </button>
-          ))}
+        <div className="study-plan-head-actions">
+          {goal ? <button className="secondary-action" onClick={() => setEditing((current) => !current)}>目標を編集</button> : null}
+          {studyPlan ? <button onClick={() => void refreshPlan()} disabled={busy}>{busy ? "更新中..." : "計画を再生成"}</button> : null}
         </div>
       </div>
+
+      {editing ? (
+        <form className="panel study-goal-form" onSubmit={saveAndGenerate}>
+          <PanelTitle icon={<Target />} title="学習目標を設定" />
+          <label className="span-2"><span>目標</span><textarea value={goalText} onChange={(event) => setGoalText(event.target.value)} maxLength={500} required /></label>
+          <label><span>対象科目</span><select value={subjectKey} onChange={(event) => { setSubjectKey(event.target.value); setError(null); }}>{SUBJECT_GROUPS.map((subject) => {
+            const ready = availableSubjectKeys.has(subject.id);
+            return <option key={subject.id} value={subject.id} disabled={!ready}>{subject.label}{ready ? "" : "（準備中）"}</option>;
+          })}</select><small className="field-help">現在利用可能: {availableSubjectLabels.join("、") || "なし"}</small></label>
+          <label><span>志望大学 <em>任意</em></span><input value={targetUniversity} onChange={(event) => setTargetUniversity(event.target.value)} maxLength={100} placeholder="例：京都大学" /><small className="field-help">一致する大学の問題を優先します。</small></label>
+          <label><span>志望研究科・専攻 <em>任意</em></span><input value={targetGraduateSchool} onChange={(event) => setTargetGraduateSchool(event.target.value)} maxLength={100} placeholder="例：情報学研究科" /><small className="field-help">一致する研究科・専攻をさらに優先します。</small></label>
+          <label><span>試験日（任意）</span><input type="date" value={targetDate} onChange={(event) => setTargetDate(event.target.value)} /></label>
+          <label><span>週あたりの日数</span><input type="number" min="1" max="7" value={sessionsPerWeek} onChange={(event) => setSessionsPerWeek(event.target.value)} /></label>
+          <label><span>1回の学習時間</span><input type="number" min="15" max="180" step="5" value={minutesPerSession} onChange={(event) => setMinutesPerSession(event.target.value)} /></label>
+          {error ? <p className="form-status error span-2" role="alert">{error}</p> : null}
+          {!subjectReady ? <p className="subject-unavailable span-2"><CircleAlert />この科目はKnowledgeGraphの生成・レビューがまだ完了していません。</p> : null}
+          <div className="study-goal-actions span-2"><button type="submit" disabled={busy || !subjectReady}>{busy ? "計画を作成中..." : "目標を保存して計画を作る"}</button></div>
+        </form>
+      ) : null}
+
+      {!editing && error ? <div className="notice" role="alert">{error}</div> : null}
+      {!editing && !studyPlan ? (
+        <div className="panel study-plan-empty">
+          <CircleAlert />
+          <div>
+            <h2>{goal && !availableSubjectKeys.has(goal.subject_key) ? `「${SUBJECT_GROUPS.find((subject) => subject.id === goal.subject_key)?.label ?? goal.subject_key}」は準備中です` : "学習計画を作成しましょう"}</h2>
+            <p>{goal && !availableSubjectKeys.has(goal.subject_key)
+              ? `現在利用できるのは${availableSubjectLabels.join("、") || "準備済み科目なし"}です。学習グラフが有効化された科目だけ計画を作成できます。`
+              : "目標と学習頻度を設定すると、前提関係と習得度から14日間の計画を作成します。"}</p>
+          </div>
+          <button onClick={() => setEditing(true)}>科目・目標を設定</button>
+        </div>
+      ) : null}
+      {!editing && studyPlan ? (
+        <>
+          <div className="panel study-roadmap">
+            <PanelTitle icon={<GitBranch />} title="学習ロードマップ" />
+            <div className="roadmap-layers">
+              {[0, 1, 2, 3].map((layer) => (
+                <section key={layer}>
+                  <h3>{["前提", "基礎", "中核", "応用"][layer]}</h3>
+                  <div>{studyPlan.nodes.filter((node) => node.layer === layer).map((node) => (
+                    <article key={node.id} className={`roadmap-node ${node.status}`}>
+                      <div><strong>{node.label}</strong><span>{node.status === "completed" ? "習得済み" : node.status === "ready" ? "学習可能" : "前提待ち"}</span></div>
+                      <p>{node.description}</p>
+                      <meter min={0} max={1} value={node.mastery} />
+                    </article>
+                  ))}</div>
+                </section>
+              ))}
+            </div>
+          </div>
+
+          <div className="panel study-schedule">
+            <PanelTitle icon={<ClipboardList />} title="これからの14日間" />
+            {completedPlanItemCount > 0 ? <p className="study-schedule-summary">この計画で完了済み: {completedPlanItemCount}件</p> : null}
+            <div className="study-session-list">
+              {pendingPlanItems.map((item) => (
+                <article key={item.id} className={`study-session ${item.status}`}>
+                  <div className="study-session-date"><strong>{new Date(`${item.scheduled_date}T00:00:00`).toLocaleDateString("ja-JP", { month: "numeric", day: "numeric", weekday: "short" })}</strong><span>{item.estimated_minutes}分</span></div>
+                  <div><strong>{item.node_label}</strong><span>{item.reason}</span>{item.problem ? <small>{item.problem.university} {item.problem.exam_year} {item.problem.problem_label} / {pageLabel(item.problem)}</small> : <small>{item.concepts?.length ? `対応分野: ${item.concepts.map((concept) => concept.name_ja).join("、")}` : "対応する分野はまだ登録されていません。"}</small>}</div>
+                  {item.problem ? <button onClick={() => void onSelect(item.problem!.id)}>問題を見る</button> : <div className="study-session-actions">{item.concepts?.find((concept) => (concept.problem_count ?? 0) > 0) ? <button className="secondary-action" onClick={() => void onBrowseConcept(item.concepts!.find((concept) => (concept.problem_count ?? 0) > 0)!.id)}>分野の問題を見る</button> : null}<button onClick={() => void finishConceptItem(item.id)}>完了</button></div>}
+                </article>
+              ))}
+              {pendingPlanItems.length === 0 ? <p className="study-schedule-summary">未完了の予定はありません。計画を再生成して次の演習を追加できます。</p> : null}
+            </div>
+          </div>
+
+          <p className="study-plan-provenance">グラフ出典: <a href={studyPlan.plan.source_repository} target="_blank" rel="noopener noreferrer">KTaisei/KnowledgeGraph</a> / commit {studyPlan.plan.source_commit.slice(0, 8)}</p>
+        </>
+      ) : null}
     </section>
   );
 }
@@ -1089,95 +1267,202 @@ function CompletedMark() {
   return <span className="problem-completed" aria-label="解答済み" title="解答済み"><CheckCircle2 /></span>;
 }
 
-function AdminPanel({ onCreated }: { onCreated: () => Promise<void> }) {
-  const [sourceId, setSourceId] = useState("");
+function AdminPanel({ user, onCreated }: { user: User; onCreated: () => Promise<void> }) {
+  const pageSize = 50;
   const [status, setStatus] = useState("");
+  const [error, setError] = useState("");
+  const [sourceTitle, setSourceTitle] = useState("");
+  const [sourceUniversity, setSourceUniversity] = useState("");
+  const [sourceYear, setSourceYear] = useState(String(new Date().getFullYear()));
+  const [sourceUrl, setSourceUrl] = useState("");
+  const [publisherPageUrl, setPublisherPageUrl] = useState("");
   const [sources, setSources] = useState<SourceDocument[]>([]);
-  const [stats, setStats] = useState<{ total: number; byUniversity: Array<{ university: string; count: number }>; byScope: Array<{ access_scope: string; count: number }> } | null>(null);
+  const [stats, setStats] = useState<SourceStats | null>(null);
+  const [total, setTotal] = useState(0);
+  const [offset, setOffset] = useState(0);
+  const [query, setQuery] = useState("");
+  const [universityFilter, setUniversityFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
+  const [displayFilter, setDisplayFilter] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+  const [updatingId, setUpdatingId] = useState<string | null>(null);
+  const requestSequence = useRef(0);
+  const canReview = canReviewSources(user);
 
   useEffect(() => {
-    void refreshSources();
+    void api.sourceStats().then(setStats).catch((loadError) => setError(loadError instanceof Error ? loadError.message : "集計を読み込めませんでした。"));
   }, []);
 
-  async function refreshSources() {
-    const [sourceData, statData] = await Promise.all([api.sources(), api.sourceStats()]);
-    setSources(sourceData.sources);
-    setStats(statData);
+  useEffect(() => {
+    const timer = window.setTimeout(() => void loadSources(0), query ? 250 : 0);
+    return () => window.clearTimeout(timer);
+  }, [query, universityFilter, statusFilter, displayFilter]);
+
+  function sourceParams(nextOffset: number) {
+    const params = new URLSearchParams({ limit: String(pageSize), offset: String(nextOffset) });
+    if (query.trim()) params.set("q", query.trim());
+    if (universityFilter) params.set("university", universityFilter);
+    if (statusFilter) params.set("status", statusFilter);
+    if (displayFilter) params.set("display", displayFilter);
+    return params;
   }
 
-  async function createManualSource() {
-    const result = await api.createSource({
-      source_type: "manual_input",
-      title: "手入力資料",
-      university: "未設定大学",
-      exam_year: 2026,
-      file_hash: `manual-${Date.now()}`,
-      storage_path: "manual/admin-input.txt",
-      access_scope: "internal_only",
-    });
-    setSourceId(result.id);
-    setStatus(`資料を作成しました: ${result.id}`);
-    await refreshSources();
-    await onCreated();
+  async function loadSources(nextOffset = offset) {
+    const sequence = ++requestSequence.current;
+    setLoading(true);
+    setError("");
+    try {
+      const sourceData = await api.sources(sourceParams(nextOffset));
+      if (sequence !== requestSequence.current) return;
+      setSources(sourceData.sources);
+      setTotal(sourceData.total);
+      setOffset(sourceData.offset);
+    } catch (loadError) {
+      if (sequence === requestSequence.current) setError(loadError instanceof Error ? loadError.message : "資料を読み込めませんでした。");
+    } finally {
+      if (sequence === requestSequence.current) setLoading(false);
+    }
   }
 
-  async function createSampleProblem() {
-    const result = await api.createProblem({
-      source_document_id: sourceId,
-      problem_label: "管理画面サンプル",
-      statement_text: "分野タグ付け待ちのサンプル問題。",
-      difficulty: 2,
-      estimated_minutes: 15,
-      answer_format: "derivation",
-      status: "candidate",
-    });
-    setStatus(`問題を作成しました: ${result.id}`);
-    await onCreated();
+  async function refreshAll() {
+    try {
+      const [, nextStats] = await Promise.all([loadSources(offset), api.sourceStats()]);
+      setStats(nextStats);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "集計を更新できませんでした。");
+    }
+  }
+
+  async function createPublicSource(event: React.FormEvent) {
+    event.preventDefault();
+    setCreating(true);
+    setStatus("");
+    setError("");
+    try {
+      const result = await api.createSource({
+        source_type: "official_pdf",
+        title: sourceTitle,
+        university: sourceUniversity,
+        exam_year: Number(sourceYear),
+        source_url: sourceUrl,
+        publisher_page_url: publisherPageUrl || undefined,
+        access_scope: "source_link_only",
+        pdf_display_mode: "external_only",
+        source_status: "needs_review",
+      });
+      setStatus(`資料を確認待ちとして登録しました（${result.id}）`);
+      setSourceTitle("");
+      setSourceUniversity("");
+      setSourceUrl("");
+      setPublisherPageUrl("");
+      await refreshAll();
+    } catch (createError) {
+      setError(createError instanceof Error ? createError.message : "資料を登録できませんでした。");
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function reviewSource(source: SourceDocument, change: Record<string, unknown>) {
+    setUpdatingId(source.id);
+    setStatus("");
+    setError("");
+    try {
+      await api.updateSource(source.id, change);
+      setStatus(`「${source.title}」の表示設定を更新しました。`);
+      await refreshAll();
+      await onCreated();
+    } catch (updateError) {
+      setError(updateError instanceof Error ? updateError.message : "表示設定を更新できませんでした。");
+    } finally {
+      setUpdatingId(null);
+    }
+  }
+
+  function statusCount(value: SourceDocument["source_status"]) {
+    return stats?.byStatus.find((item) => item.source_status === value)?.count ?? 0;
+  }
+
+  function sourceHostname(source: SourceDocument) {
+    try {
+      return source.source_url ? new URL(source.source_url).hostname : "URL未設定";
+    } catch {
+      return "URL要確認";
+    }
+  }
+
+  function canActivate(source: SourceDocument) {
+    return Boolean(source.source_url && source.access_scope !== "restricted" && sourceHostname(source) !== "raw.githubusercontent.com");
   }
 
   return (
-    <section className="admin-grid">
-      <div className="panel">
-        <PanelTitle icon={<FilePlus2 />} title="資料を登録" />
-        <p className="muted">過去問PDFや手入力した問題元を、大学院・年度と一緒に登録します。</p>
-        <button onClick={() => void createManualSource()}>手入力の資料を作成</button>
+    <section className="source-admin-page">
+      <header className="source-admin-header">
+        <div><span className="dashboard-eyebrow">SOURCE LIBRARY</span><h1>資料管理</h1><p>公式PDFの公開状態と表示方法を確認・管理します。</p></div>
+        <button className="source-refresh" onClick={() => void refreshAll()} disabled={loading}><RefreshCw />{loading ? "更新中" : "最新の状態に更新"}</button>
+      </header>
+
+      <div className="source-kpis" aria-label="資料の状態別件数">
+        <button className={!statusFilter ? "source-kpi active" : "source-kpi"} onClick={() => setStatusFilter("")}><Database /><span>すべて</span><strong>{stats?.total ?? 0}</strong><small>登録資料</small></button>
+        <button className={statusFilter === "active" ? "source-kpi active" : "source-kpi"} onClick={() => setStatusFilter("active")}><FileCheck2 /><span>公開中</span><strong>{statusCount("active")}</strong><small>学習者に表示</small></button>
+        <button className={statusFilter === "needs_review" ? "source-kpi active" : "source-kpi"} onClick={() => setStatusFilter("needs_review")}><CircleAlert /><span>確認待ち</span><strong>{statusCount("needs_review")}</strong><small>公開前の確認が必要</small></button>
+        <button className={statusFilter === "unavailable" ? "source-kpi active" : "source-kpi"} onClick={() => setStatusFilter("unavailable")}><ShieldCheck /><span>利用停止</span><strong>{statusCount("unavailable")}</strong><small>現在は非公開</small></button>
       </div>
-      <div className="panel">
-        <PanelTitle icon={<BookOpen />} title="問題を登録" />
-        <input value={sourceId} onChange={(event) => setSourceId(event.target.value)} placeholder="資料ID" />
-        <button onClick={() => void createSampleProblem()} disabled={!sourceId}>サンプル問題を作成</button>
-      </div>
-      <div className="panel span-2">
-        <PanelTitle icon={<ChevronRight />} title="公開前チェック" />
-        <p>問題を学習者に出すには、本文、分野タグ、難易度、想定時間、重複チェックをそろえて確認済みにします。</p>
-        {status && <div className="notice">{status}</div>}
-      </div>
-      <div className="panel span-2">
-        <PanelTitle icon={<Database />} title="登録済み資料" action="更新" onAction={() => void refreshSources()} />
-        <div className="source-stats">
-          <strong>{stats?.total ?? sources.length}件の資料</strong>
-          {stats?.byScope.map((item) => (
-            <span key={item.access_scope}>{labelOf(ACCESS_SCOPE_LABELS, item.access_scope)}: {item.count}</span>
-          ))}
+
+      {status ? <div className="form-status success" role="status">{status}</div> : null}
+      {error ? <div className="form-status error" role="alert">{error}</div> : null}
+
+      <details className="panel source-create-panel">
+        <summary><span><FilePlus2 />新しい公式資料を登録</span><small>PDFファイルは保存せず、公開元URLだけを登録します</small><ChevronRight /></summary>
+        <form className="source-link-form" onSubmit={createPublicSource}>
+          <label className="span-2" htmlFor="source-title"><span>資料名</span><input id="source-title" value={sourceTitle} onChange={(event) => setSourceTitle(event.target.value)} placeholder="例：2026年度 情報学研究科 入試問題" required /></label>
+          <label htmlFor="source-university"><span>大学名</span><input id="source-university" value={sourceUniversity} onChange={(event) => setSourceUniversity(event.target.value)} required /></label>
+          <label htmlFor="source-year"><span>年度</span><input id="source-year" type="number" value={sourceYear} onChange={(event) => setSourceYear(event.target.value)} min="1900" max="2100" required /></label>
+          <label className="span-2" htmlFor="source-pdf-url"><span>公式PDF URL</span><input id="source-pdf-url" type="url" value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="https://.../exam.pdf" required /></label>
+          <label className="span-2" htmlFor="source-page-url"><span>公式掲載ページ URL <em>任意</em></span><input id="source-page-url" type="url" value={publisherPageUrl} onChange={(event) => setPublisherPageUrl(event.target.value)} placeholder="https://.../past-exams" /></label>
+          <div className="source-form-note span-2"><ShieldCheck />登録後は「確認待ち」になります。レビュー担当者がリンクと公開条件を確認してから有効化します。</div>
+          <div className="source-form-actions span-2"><button type="submit" disabled={creating}>{creating ? "登録中..." : "確認待ちとして登録"}</button></div>
+        </form>
+      </details>
+
+      <section className="panel source-library-panel">
+        <div className="source-library-title"><div><span>登録済み資料</span><h2>{total.toLocaleString("ja-JP")}件</h2></div><p>公開状態とPDF表示方式を行ごとに確認できます。</p></div>
+        <div className="source-filters">
+          <label className="source-filter-search" htmlFor="source-search"><Search /><span className="sr-only">資料を検索</span><input id="source-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="資料名・大学・研究科で検索" /></label>
+          <label><Filter /><span className="sr-only">大学で絞り込み</span><select value={universityFilter} onChange={(event) => setUniversityFilter(event.target.value)}><option value="">すべての大学</option>{stats?.byUniversity.map((item) => <option key={item.university} value={item.university}>{item.university}（{item.count}）</option>)}</select></label>
+          <label><span className="sr-only">公開状態で絞り込み</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="">すべての状態</option><option value="active">公開中</option><option value="needs_review">確認待ち</option><option value="unavailable">利用停止</option></select></label>
+          <label><span className="sr-only">表示方式で絞り込み</span><select value={displayFilter} onChange={(event) => setDisplayFilter(event.target.value)}><option value="">すべての表示方式</option><option value="external_only">別タブ表示</option><option value="embed">サイト内表示</option></select></label>
         </div>
-        <div className="university-grid">
-          {stats?.byUniversity.slice(0, 12).map((item) => (
-            <div key={item.university}>
-              <span>{item.university}</span>
-              <strong>{item.count}</strong>
-            </div>
-          ))}
+
+        <div className="source-table-shell" aria-busy={loading}>
+          <table className="source-data-table">
+            <thead><tr><th>資料</th><th>年度・問題</th><th>公開状態</th><th>PDF表示</th><th>リンク</th><th>操作</th></tr></thead>
+            <tbody>
+              {!loading && sources.length === 0 ? <tr><td colSpan={6}><div className="source-empty"><Search /><strong>条件に一致する資料がありません</strong><span>検索語や絞り込み条件を変更してください。</span></div></td></tr> : null}
+              {sources.map((source) => (
+                <tr key={source.id}>
+                  <td data-label="資料"><strong className="source-title-cell">{source.title}</strong><span>{source.university}{source.graduate_school ? ` / ${source.graduate_school}` : ""}</span><small>{sourceHostname(source)}</small></td>
+                  <td data-label="年度・問題"><strong>{source.exam_year}年度</strong><span>{Number(source.problem_count).toLocaleString("ja-JP")}問</span></td>
+                  <td data-label="公開状態"><span className={`source-badge ${source.source_status}`}>{SOURCE_STATUS_LABELS[source.source_status]}</span><small>{labelOf(ACCESS_SCOPE_LABELS, source.access_scope)}</small></td>
+                  <td data-label="PDF表示"><span className={`source-badge display ${source.pdf_display_mode}`}>{PDF_DISPLAY_LABELS[source.pdf_display_mode]}</span><small>{source.source_checked_at ? `確認 ${new Date(`${source.source_checked_at}Z`).toLocaleDateString("ja-JP")}` : "未確認"}</small></td>
+                  <td data-label="リンク"><div className="source-links">{source.source_url ? <a href={source.source_url} target="_blank" rel="noopener noreferrer"><ExternalLink />PDF</a> : null}{source.publisher_page_url ? <a href={source.publisher_page_url} target="_blank" rel="noopener noreferrer"><Link2 />掲載ページ</a> : null}</div></td>
+                  <td data-label="操作"><div className="source-row-actions">
+                    {canReview && source.source_status !== "active" && canActivate(source) ? <button onClick={() => void reviewSource(source, { source_status: "active", access_scope: "source_link_only", pdf_display_mode: "external_only" })} disabled={updatingId === source.id}>公開する</button> : null}
+                    {canReview && source.source_status === "active" ? <button className="secondary-action" onClick={() => void reviewSource(source, { pdf_display_mode: source.pdf_display_mode === "embed" ? "external_only" : "embed" })} disabled={updatingId === source.id}>{source.pdf_display_mode === "embed" ? "別タブ表示へ" : "埋め込み許可"}</button> : null}
+                    {canReview && source.source_status === "active" ? <button className="quiet-danger" onClick={() => { if (window.confirm(`「${source.title}」を学習者から非表示にしますか？`)) void reviewSource(source, { source_status: "unavailable" }); }} disabled={updatingId === source.id}>利用停止</button> : null}
+                    {!canReview ? <span className="source-action-note">レビュー権限が必要</span> : null}
+                    {canReview && source.source_status !== "active" && !canActivate(source) ? <span className="source-action-note">{source.access_scope === "restricted" ? "利用条件により非公開" : "外部ミラーのため非公開"}</span> : null}
+                  </div></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {loading ? <div className="source-loading">資料を読み込んでいます...</div> : null}
         </div>
-        <div className="source-table">
-          {sources.slice(0, 30).map((source) => (
-            <a key={source.id} href={source.source_url ?? "#"} target="_blank" rel="noreferrer">
-              <span>{source.university} {source.exam_year}</span>
-              <strong>{source.title}</strong>
-              <em>{labelOf(ACCESS_SCOPE_LABELS, source.access_scope)}</em>
-            </a>
-          ))}
-        </div>
-      </div>
+
+        <footer className="source-pagination"><span>{total === 0 ? 0 : offset + 1}〜{Math.min(offset + pageSize, total)}件 / 全{total.toLocaleString("ja-JP")}件</span><div><button onClick={() => void loadSources(Math.max(0, offset - pageSize))} disabled={loading || offset === 0}><ChevronLeft />前へ</button><strong>{Math.floor(offset / pageSize) + 1} / {Math.max(1, Math.ceil(total / pageSize))}</strong><button onClick={() => void loadSources(offset + pageSize)} disabled={loading || offset + pageSize >= total}>次へ<ChevronRight /></button></div></footer>
+      </section>
     </section>
   );
 }

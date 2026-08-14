@@ -1,0 +1,20 @@
+{
+  "N01": ["con_mathematical_foundations"],
+  "N02": ["con_logic"],
+  "N03": ["con_set_theory"],
+  "N04": ["con_proof_method"],
+  "N05": ["con_discrete_math"],
+  "N06": ["con_algorithm"],
+  "N07": ["con_data_structure"],
+  "N08": ["con_algorithm_complexity"],
+  "N09": ["con_programming_systems_extended"],
+  "N10": ["con_sorting"],
+  "N11": ["con_graph"],
+  "N12": ["con_graph_search"],
+  "N13": ["con_union_find"],
+  "N14": ["con_automata_language"],
+  "N15": ["con_information_theory"],
+  "N16": ["con_optimization"],
+  "N17": ["con_graph_algorithms_extended"],
+  "N18": ["con_dp"]
+}

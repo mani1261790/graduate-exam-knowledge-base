@@ -1,0 +1,18 @@
+{
+  "graph_id": "humanities_social_curated_v1",
+  "topic": "人文・社会",
+  "created_at": "2026-08-13T00:00:00Z",
+  "meta": {
+    "source": "Curated for graduate-exam preparation using the KTaisei/KnowledgeGraph schema",
+    "review_status": "reviewed"
+  },
+  "nodes": [
+    { "node_id": "N01", "label": "人間社会情報", "type": "FOUNDATIONAL", "layer": 0, "description": "人・社会・情報技術の相互作用を概念と事例で捉える。", "prerequisites": [] },
+    { "node_id": "N02", "label": "経済経営", "type": "FOUNDATIONAL", "layer": 0, "description": "資源配分、組織、意思決定を経済と経営の基本概念で考える。", "prerequisites": [] },
+    { "node_id": "N03", "label": "心理・臨床心理", "type": "BASIC", "layer": 1, "description": "認知、発達、行動を理論と研究方法に基づいて説明する。", "prerequisites": ["N01"] },
+    { "node_id": "N04", "label": "教育・福祉", "type": "BASIC", "layer": 1, "description": "教育と福祉の制度・支援を対象者と社会の文脈で理解する。", "prerequisites": ["N01"] },
+    { "node_id": "N05", "label": "社会経営・人文学", "type": "CORE", "layer": 2, "description": "社会制度、文化、歴史、言語の視点を用いて論点を整理する。", "prerequisites": ["N01", "N02"] },
+    { "node_id": "N06", "label": "社会課題と情報", "type": "APPLICATION", "layer": 3, "description": "社会的課題に対し、根拠を示しながら情報技術と制度の関係を論じる。", "prerequisites": ["N03", "N04", "N05"] }
+  ],
+  "edges": []
+}

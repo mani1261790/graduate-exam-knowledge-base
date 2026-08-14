@@ -1,0 +1,14 @@
+{
+  "N01": ["con_math_foundations_extended"],
+  "N02": ["con_calculus"],
+  "N03": ["con_linear_algebra"],
+  "N04": ["con_probability"],
+  "N05": ["con_multivariable_calculus"],
+  "N06": ["con_ordinary_differential_equation"],
+  "N07": ["con_eigenvalue"],
+  "N08": ["con_statistics"],
+  "N09": ["con_fourier_analysis"],
+  "N10": ["con_numerical_analysis"],
+  "N11": ["con_optimization"],
+  "N12": ["con_engineering_math"]
+}

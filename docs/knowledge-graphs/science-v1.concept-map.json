@@ -1,0 +1,13 @@
+{
+  "N01": ["con_physics"],
+  "N02": ["con_general_chemistry"],
+  "N03": ["con_life_science"],
+  "N04": ["con_classical_mechanics"],
+  "N05": ["con_electromagnetism"],
+  "N06": ["con_thermodynamics"],
+  "N07": ["con_quantum_mechanics"],
+  "N08": ["con_organic_chemistry"],
+  "N09": ["con_molecular_biology"],
+  "N10": ["con_materials_science_extended"],
+  "N11": ["con_chemistry_extended"]
+}

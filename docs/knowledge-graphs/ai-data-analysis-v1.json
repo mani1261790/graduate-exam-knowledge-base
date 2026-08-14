@@ -1,0 +1,22 @@
+{
+  "graph_id": "ai_data_analysis_curated_v1",
+  "topic": "AI・データ分析",
+  "created_at": "2026-08-13T00:00:00Z",
+  "meta": {
+    "source": "Curated for graduate-exam preparation using the KTaisei/KnowledgeGraph schema",
+    "review_status": "reviewed"
+  },
+  "nodes": [
+    { "node_id": "N01", "label": "線形代数", "type": "FOUNDATIONAL", "layer": 0, "description": "ベクトル・行列で特徴量、変換、最小二乗を表す。", "prerequisites": [] },
+    { "node_id": "N02", "label": "確率", "type": "FOUNDATIONAL", "layer": 0, "description": "確率変数と分布で不確実なデータを扱う。", "prerequisites": [] },
+    { "node_id": "N03", "label": "統計", "type": "FOUNDATIONAL", "layer": 0, "description": "推定と検定により、標本から信頼できる結論を導く。", "prerequisites": ["N02"] },
+    { "node_id": "N04", "label": "最適化", "type": "BASIC", "layer": 1, "description": "目的関数、勾配、制約を通じて学習問題を定式化する。", "prerequisites": ["N01"] },
+    { "node_id": "N05", "label": "統計モデリング", "type": "BASIC", "layer": 1, "description": "モデル仮定、尤度、回帰を使ってデータ生成過程を説明する。", "prerequisites": ["N02", "N03"] },
+    { "node_id": "N06", "label": "データ構造", "type": "BASIC", "layer": 1, "description": "データ表現と計算量を意識して、学習処理を実装する。", "prerequisites": [] },
+    { "node_id": "N07", "label": "機械学習", "type": "CORE", "layer": 2, "description": "分類・回帰・汎化を、損失関数と評価指標に基づいて扱う。", "prerequisites": ["N01", "N03", "N04", "N05"] },
+    { "node_id": "N08", "label": "データ分析", "type": "CORE", "layer": 2, "description": "前処理、可視化、モデル評価を通じてデータから洞察を得る。", "prerequisites": ["N03", "N05", "N06"] },
+    { "node_id": "N09", "label": "機械学習応用", "type": "APPLICATION", "layer": 3, "description": "課題設定、特徴設計、モデル選択、誤差分析を一連の手順として行う。", "prerequisites": ["N07", "N08"] },
+    { "node_id": "N10", "label": "AIと情報社会", "type": "APPLICATION", "layer": 3, "description": "性能だけでなく、公平性、説明可能性、社会的影響を踏まえてAIを評価する。", "prerequisites": ["N07", "N09"] }
+  ],
+  "edges": []
+}

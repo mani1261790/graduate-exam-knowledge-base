@@ -1,0 +1,12 @@
+{
+  "N01": ["con_linear_algebra"],
+  "N02": ["con_probability"],
+  "N03": ["con_statistics"],
+  "N04": ["con_optimization"],
+  "N05": ["con_statistical_modeling"],
+  "N06": ["con_data_structure"],
+  "N07": ["con_machine_learning"],
+  "N08": ["con_statistical_modeling"],
+  "N09": ["con_machine_learning_extended"],
+  "N10": ["con_ai_society"]
+}

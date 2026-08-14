@@ -1,0 +1,16 @@
+{
+  "graph_id": "english_academic_reading_curated_v1",
+  "topic": "英語・専門読解",
+  "created_at": "2026-08-13T00:00:00Z",
+  "meta": {
+    "source": "Curated for graduate-exam preparation using the KTaisei/KnowledgeGraph schema",
+    "review_status": "reviewed"
+  },
+  "nodes": [
+    { "node_id": "N01", "label": "専門英語", "type": "FOUNDATIONAL", "layer": 0, "description": "専門分野の頻出語と文構造を押さえ、正確に文意を取る。", "prerequisites": [] },
+    { "node_id": "N02", "label": "科学英語", "type": "BASIC", "layer": 1, "description": "科学技術の説明文に特有の表現と論理展開を読む。", "prerequisites": ["N01"] },
+    { "node_id": "N03", "label": "学術読解・論述", "type": "CORE", "layer": 2, "description": "主張・根拠・条件を整理し、問いに沿って要約・論述する。", "prerequisites": ["N01", "N02"] },
+    { "node_id": "N04", "label": "入試学術英語", "type": "APPLICATION", "layer": 3, "description": "時間制約の下で専門英文を読み、設問に対して根拠を示して答える。", "prerequisites": ["N03"] }
+  ],
+  "edges": []
+}
