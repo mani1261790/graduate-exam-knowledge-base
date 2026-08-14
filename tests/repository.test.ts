@@ -28,6 +28,7 @@ describe("searchQueryVariants", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]?.sql).toContain("p.problem_label LIKE ?");
     expect(calls[0]?.sql).toContain("search_concept.name_ja LIKE ?");
+    expect(calls[0]?.sql).toContain("END DESC, p.status = 'reviewed' DESC");
     expect(calls[0]?.values).toContain("%木%");
     expect(calls[0]?.values).toContain("%証明%");
   });

@@ -82,6 +82,7 @@ export async function listProblems(
 ): Promise<ProblemListItem[]> {
   const where: string[] = [];
   const bind: Array<string | number> = [];
+  let searchPriority: string | null = null;
 
   if (filters.university) {
     where.push("sd.university = ?");
@@ -106,6 +107,7 @@ export async function listProblems(
   }
   if (filters.q) {
     const variants = searchQueryVariants(filters.q);
+    searchPriority = variants[1] ?? variants[0] ?? null;
     const searchableProblemFields = [
       "p.problem_label",
       "p.statement_text",
@@ -155,6 +157,13 @@ export async function listProblems(
     bind.push(filters.concept, filters.concept, `%${filters.concept}%`, `%${filters.concept}%`, `%${filters.concept}%`);
   }
 
+  const searchOrderClause = searchPriority
+    ? `CASE
+         WHEN p.problem_label LIKE ? THEN 3
+         WHEN p.statement_text LIKE ? OR p.explanation_text LIKE ? THEN 2
+         ELSE 0
+       END DESC, `
+    : "";
   const sql = `SELECT p.id, p.problem_label, p.statement_text, p.page_start, p.page_end,
                       sd.university, sd.graduate_school, sd.department, sd.exam_year, sd.source_url,
                       sd.publisher_page_url, sd.pdf_display_mode, sd.source_status,
@@ -166,10 +175,11 @@ export async function listProblems(
                FROM problems p
                JOIN source_documents sd ON sd.id = p.source_document_id
                ${where.length > 0 ? `WHERE ${where.join(" AND ")}` : ""}
-               ORDER BY p.status = 'reviewed' DESC, sd.exam_year DESC, p.difficulty ASC
+               ORDER BY ${searchOrderClause}p.status = 'reviewed' DESC, sd.exam_year DESC, p.difficulty ASC
                LIMIT ? OFFSET ?`;
 
-  const { results } = await db.prepare(sql).bind(user.id, ...bind, filters.limit ?? 80, filters.offset ?? 0).all<ProblemRow>();
+  const searchOrderBind = searchPriority ? [`%${searchPriority}%`, `%${searchPriority}%`, `%${searchPriority}%`] : [];
+  const { results } = await db.prepare(sql).bind(user.id, ...bind, ...searchOrderBind, filters.limit ?? 80, filters.offset ?? 0).all<ProblemRow>();
   return attachConcepts(db, results, user.id);
 }
 
