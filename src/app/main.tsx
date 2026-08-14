@@ -304,7 +304,7 @@ function App() {
               onKeyDown={(event) => {
                 if (event.key === "Enter") void searchProblems();
               }}
-              placeholder="固有値、Union-Find、木の証明っぽいやつ"
+              placeholder="固有値、二分木、Union-Find"
             />
             <button onClick={() => void searchProblems()}>検索</button>
           </div>

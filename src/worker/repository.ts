@@ -4,6 +4,26 @@ import { academicFieldMatch, recommendationModeEligible, recommendationModeScore
 
 type ProblemRow = Omit<ProblemListItem, "concepts">;
 
+/**
+ * Keeps a natural-language search useful without pretending that the database
+ * has a full Japanese semantic-search index. In particular, a phrase such as
+ * "木の証明っぽいやつ" also searches its meaningful words ("木", "証明").
+ */
+export function searchQueryVariants(query: string): string[] {
+  const exact = query.trim();
+  if (!exact) return [];
+
+  const keywords = exact
+    .replace(/(?:っぽい|みたい(?:な)?|やつ|もの|問題|について|を教えて|を探して)/g, " ")
+    .replace(/[、，,・/／]/g, " ")
+    .replace(/[のをにはがとへで]/g, " ")
+    .split(/\s+/)
+    .map((term) => term.trim())
+    .filter((term) => term.length > 0);
+
+  return [...new Set([exact, ...keywords])].slice(0, 8);
+}
+
 export async function attachConcepts(db: D1Database, problems: ProblemRow[], userId?: string): Promise<ProblemListItem[]> {
   if (problems.length === 0) return [];
   const ids = problems.map((problem) => problem.id);
@@ -85,9 +105,38 @@ export async function listProblems(
     where.push("sd.source_url IS NOT NULL AND sd.source_url <> ''");
   }
   if (filters.q) {
-    where.push("(p.statement_text LIKE ? OR p.explanation_text LIKE ? OR sd.university LIKE ? OR p.subject_raw LIKE ?)");
-    const query = `%${filters.q}%`;
-    bind.push(query, query, query, query);
+    const variants = searchQueryVariants(filters.q);
+    const searchableProblemFields = [
+      "p.problem_label",
+      "p.statement_text",
+      "p.explanation_text",
+      "p.answer_text",
+      "p.subject_raw",
+      "sd.title",
+      "sd.university",
+      "sd.graduate_school",
+      "sd.department",
+    ];
+    const variantClauses = variants.map(() => `(
+      ${searchableProblemFields.map((field) => `${field} LIKE ?`).join(" OR ")}
+      OR EXISTS (
+        SELECT 1
+        FROM knowledge_edges search_edge
+        JOIN node_registry search_problem_node ON search_problem_node.node_id = search_edge.from_node_id
+        JOIN node_registry search_concept_node ON search_concept_node.node_id = search_edge.to_node_id
+        JOIN concepts search_concept ON search_concept.id = search_concept_node.entity_id
+        WHERE search_problem_node.entity_type = 'problem'
+          AND search_problem_node.entity_id = p.id
+          AND search_concept_node.entity_type = 'concept'
+          AND search_edge.status = 'approved'
+          AND (search_concept.slug LIKE ? OR search_concept.name_ja LIKE ? OR search_concept.name_en LIKE ? OR search_concept.aliases LIKE ?)
+      )
+    )`);
+    where.push(`(${variantClauses.join(" OR ")})`);
+    for (const variant of variants) {
+      const query = `%${variant}%`;
+      bind.push(...searchableProblemFields.map(() => query), query, query, query, query);
+    }
   }
   if (filters.concept) {
     where.push(
