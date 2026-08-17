@@ -52,7 +52,7 @@ jobs:
       - name: Build application
         run: npm run build
 
-      - name: Render private production configuration
+      - name: Render production configuration
         run: node scripts/render-wrangler-config.mjs
 
       - name: Apply production D1 migrations
