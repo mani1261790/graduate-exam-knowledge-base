@@ -69,6 +69,7 @@ function SolveWorkspace({ problem }: { problem: ProblemDetail }) {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [masteryEvidenceApplied, setMasteryEvidenceApplied] = useState(true);
   const [chatOpen, setChatOpen] = useState(false);
   const [chatMessages, setChatMessages] = useState<ProblemChatMessage[]>([]);
   const [chatInput, setChatInput] = useState("");
@@ -106,7 +107,7 @@ function SolveWorkspace({ problem }: { problem: ProblemDetail }) {
     setSaving(true);
     setSaveError(null);
     try {
-      await api.createAttempt({
+      const response = await api.createAttempt({
         problem_id: problem.id,
         started_at: startedAt.current,
         result,
@@ -117,6 +118,7 @@ function SolveWorkspace({ problem }: { problem: ProblemDetail }) {
         self_confidence: Number(confidence),
         mistakes: weakConceptIds.map((conceptId) => ({ concept_id: conceptId, mistake_type: "concept_missing" })),
       });
+      setMasteryEvidenceApplied(response.mastery_evidence_applied);
       setSaved(true);
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : "学習記録を保存できませんでした。");
@@ -165,13 +167,12 @@ function SolveWorkspace({ problem }: { problem: ProblemDetail }) {
         </div>
       </header>
 
-      <section className="solve-pdf-pane" aria-label="問題PDF">
+      <section className={pdfUrl ? "solve-pdf-pane" : "solve-pdf-pane original"} aria-label={pdfUrl ? "問題PDF" : "オリジナル診断問題"}>
         <div className="pane-label">
-          <div><span>公式PDF全体</span><small>対象: {pages.start === pages.end ? `${pages.start}ページ` : `${pages.start}〜${pages.end}ページ`}</small></div>
-          <p>問題ごとの切り出しではありません。PDF内の対象ページを確認してください。</p>
+          {pdfUrl ? <><div><span>公式PDF全体</span><small>対象: {pages.start === pages.end ? `${pages.start}ページ` : `${pages.start}〜${pages.end}ページ`}</small></div><p>問題ごとの切り出しではありません。PDF内の対象ページを確認してください。</p></> : <><div><span>オリジナル診断問題</span><small>承認済み制作物</small></div><p>問題本文を読み、右上のタイマーを使って解答してください。</p></>}
         </div>
         {!pdfUrl ? (
-          <ExternalPdfFallback message="この問題には公開元PDFが登録されていません。" />
+          <article className="solve-original-problem"><span>ORIGINAL DIAGNOSTIC ITEM</span><h1>{problem.problem_label}</h1><p>{problem.statement_text}</p></article>
         ) : problem.pdf_display_mode === "embed" ? (
           <div className="external-pdf-shell">
             <iframe src={pdfUrl} title={`${problem.problem_label} 公式PDF`} />
@@ -204,7 +205,7 @@ function SolveWorkspace({ problem }: { problem: ProblemDetail }) {
         <div className="finish-backdrop" role="dialog" aria-modal="true" aria-label="学習記録">
           <section className="finish-dialog">
             <div className="finish-head"><div><span>学習記録</span><h1>{saved ? "保存しました" : "結果を記録する"}</h1></div>{!saved ? <button onClick={closeFinish} aria-label="閉じる"><X /></button> : null}</div>
-            {saved ? <div className="finish-success"><Check /><p>所要時間と結果を、学習計画と復習時期に反映しました。</p><a href="/?view=study-plan">学習計画へ戻る</a></div> : (
+            {saved ? <div className="finish-success"><Check /><p>{masteryEvidenceApplied ? "所要時間と結果を、学習計画と復習時期に反映しました。" : "答案と所要時間を保存しました。この問題は校正審査中のため、習熟度にはまだ反映しません。"}</p><a href="/?view=study-plan">学習計画へ戻る</a></div> : (
               <>
                 <fieldset className="finish-section result-section"><legend>今回の結果 <span>必須</span></legend><div className="result-options">{Object.entries(RESULT_LABELS).map(([value, label]) => <button type="button" key={value} className={result === value ? "active" : ""} aria-pressed={result === value} onClick={() => setResult(value)}>{label}</button>)}</div></fieldset>
                 <div className="finish-row">

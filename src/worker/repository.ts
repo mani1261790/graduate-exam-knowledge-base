@@ -1,8 +1,26 @@
 import type { AppUser, ConceptSummary, ProblemDetail, ProblemListItem, RecommendationMode, SimilarProblem } from "./domain";
 import { parseJsonArray } from "./json";
-import { academicFieldMatch, recommendationModeEligible, recommendationModeScore, similarProblemScore } from "./scoring";
+import {
+  academicFieldMatch,
+  predictedSuccess,
+  recommendationModeEligible,
+  RECOMMENDATION_MODEL_LABEL,
+  RECOMMENDATION_MODEL_VERSION,
+  recommendationModeScore,
+  similarProblemScore,
+} from "./scoring";
+import { conservativeMastery, masteryConfidence } from "./analytics";
+import { buildShadowPredictions, personalCalibrationOffset } from "./shadow-models";
 
 type ProblemRow = Omit<ProblemListItem, "concepts">;
+type RecommendationRow = ProblemRow & {
+  score: number;
+  reasons: string;
+  model_version: string;
+  predicted_success: number | null;
+  baseline_success: number | null;
+  prediction_confidence: number | null;
+};
 
 /**
  * Keeps a natural-language search useful without pretending that the database
@@ -62,6 +80,7 @@ export async function attachConcepts(db: D1Database, problems: ProblemRow[], use
   return problems.map((problem) => ({
     ...problem,
     completed: Boolean(problem.completed),
+    governed_original: Boolean(problem.governed_original),
     concepts: conceptsByProblem.get(problem.id) ?? [],
   }));
 }
@@ -103,7 +122,13 @@ export async function listProblems(
     where.push("p.status = 'reviewed'");
     where.push("sd.source_status = 'active'");
     where.push("sd.access_scope IN ('source_link_only', 'public_ready')");
-    where.push("sd.source_url IS NOT NULL AND sd.source_url <> ''");
+    where.push(`(
+      (sd.source_url IS NOT NULL AND sd.source_url <> '' AND LOWER(sd.source_url) LIKE 'https://%')
+      OR EXISTS (
+        SELECT 1 FROM diagnostic_problem_contents dpc
+        WHERE dpc.problem_id = p.id AND dpc.status = 'approved' AND dpc.materialized_at IS NOT NULL
+      )
+    )`);
   }
   if (filters.q) {
     const variants = searchQueryVariants(filters.q);
@@ -169,6 +194,10 @@ export async function listProblems(
                       sd.publisher_page_url, sd.pdf_display_mode, sd.source_status,
                       p.subject_raw, p.difficulty, p.estimated_minutes, p.answer_format, p.status,
                       p.answer_text, p.explanation_text,
+                      EXISTS(
+                        SELECT 1 FROM diagnostic_problem_contents dpc
+                        WHERE dpc.problem_id = p.id AND dpc.status = 'approved' AND dpc.materialized_at IS NOT NULL
+                      ) AS governed_original,
                       CASE WHEN EXISTS (
                         SELECT 1 FROM attempts a WHERE a.problem_id = p.id AND a.user_id = ?
                       ) THEN 1 ELSE 0 END AS completed
@@ -187,7 +216,11 @@ export async function getProblem(db: D1Database, user: AppUser, problemId: strin
   const problem = await db
     .prepare(
       `SELECT p.*, sd.title AS source_title, sd.university, sd.graduate_school, sd.department, sd.exam_year,
-              sd.exam_category, sd.source_url, sd.publisher_page_url, sd.pdf_display_mode, sd.source_status, sd.access_scope
+              sd.exam_category, sd.source_url, sd.publisher_page_url, sd.pdf_display_mode, sd.source_status, sd.access_scope,
+              EXISTS(
+                SELECT 1 FROM diagnostic_problem_contents dpc
+                WHERE dpc.problem_id = p.id AND dpc.status = 'approved' AND dpc.materialized_at IS NOT NULL
+              ) AS governed_original
        FROM problems p
        JOIN source_documents sd ON sd.id = p.source_document_id
        WHERE p.id = ?`,
@@ -200,7 +233,8 @@ export async function getProblem(db: D1Database, user: AppUser, problemId: strin
     problem.status !== "reviewed"
     || problem.source_status !== "active"
     || !["source_link_only", "public_ready"].includes(String(problem.access_scope))
-    || !problem.source_url
+    || (!(typeof problem.source_url === "string" && problem.source_url.toLowerCase().startsWith("https://"))
+      && Number(problem.governed_original) !== 1)
   )) return null;
 
   const concepts = await attachConcepts(
@@ -216,6 +250,7 @@ export async function getProblem(db: D1Database, user: AppUser, problemId: strin
         publisher_page_url: problem.publisher_page_url as string | null,
         pdf_display_mode: problem.pdf_display_mode as ProblemRow["pdf_display_mode"],
         source_status: problem.source_status as ProblemRow["source_status"],
+        governed_original: Number(problem.governed_original) === 1,
         university: String(problem.university),
         graduate_school: problem.graduate_school as string | null,
         department: problem.department as string | null,
@@ -318,7 +353,13 @@ export async function listConcepts(db: D1Database, q?: string): Promise<ConceptS
            WHEN p.status = 'reviewed'
             AND sd.source_status = 'active'
             AND sd.access_scope IN ('source_link_only', 'public_ready')
-            AND sd.source_url IS NOT NULL AND sd.source_url <> ''
+            AND (
+              (sd.source_url IS NOT NULL AND sd.source_url <> '' AND LOWER(sd.source_url) LIKE 'https://%')
+              OR EXISTS (
+                SELECT 1 FROM diagnostic_problem_contents dpc
+                WHERE dpc.problem_id = p.id AND dpc.status = 'approved' AND dpc.materialized_at IS NOT NULL
+              )
+            )
            THEN p.id
          END) AS problem_count
        FROM concepts c
@@ -394,7 +435,13 @@ export async function getConceptDetail(db: D1Database, conceptIdOrSlug: string, 
          AND p.status = 'reviewed'
          AND sd.source_status = 'active'
          AND sd.access_scope IN ('source_link_only', 'public_ready')
-         AND sd.source_url IS NOT NULL AND sd.source_url <> ''
+         AND (
+           (sd.source_url IS NOT NULL AND sd.source_url <> '' AND LOWER(sd.source_url) LIKE 'https://%')
+           OR EXISTS (
+             SELECT 1 FROM diagnostic_problem_contents dpc
+             WHERE dpc.problem_id = p.id AND dpc.status = 'approved' AND dpc.materialized_at IS NOT NULL
+           )
+         )
        ORDER BY p.difficulty ASC, sd.exam_year DESC
        LIMIT 40`,
     )
@@ -410,13 +457,30 @@ export async function getConceptDetail(db: D1Database, conceptIdOrSlug: string, 
 }
 
 export async function buildRecommendations(db: D1Database, userId: string, mode: RecommendationMode): Promise<void> {
-  const user = await db.prepare("SELECT department FROM users WHERE id = ?").bind(userId).first<{ department: string | null }>();
+  const user = await db
+    .prepare(
+      `SELECT u.department, COALESCE(AVG(a.score_rate), 0.5) AS baseline_success
+       FROM users u LEFT JOIN attempts a ON a.user_id = u.id
+       WHERE u.id = ? GROUP BY u.id`,
+    )
+    .bind(userId)
+    .first<{ department: string | null; baseline_success: number }>();
   const problems = await db
     .prepare(
       `SELECT p.id, p.difficulty, p.estimated_minutes, sd.university, sd.graduate_school, sd.department, p.subject_raw,
               GROUP_CONCAT(DISTINCT c.name_ja) AS concept_names,
-              COALESCE(AVG(CASE WHEN ke.edge_type = 'tests' THEN 1 - COALESCE(ucs.mastery_score, 0.5) END), 0) AS weakness,
-              COALESCE(AVG(CASE WHEN ke.edge_type = 'requires' THEN COALESCE(ucs.mastery_score, 0.5) END), 1) AS prerequisite_readiness,
+              COALESCE(
+                SUM(CASE WHEN ke.edge_type = 'tests' THEN (1 - COALESCE(ucs.mastery_score, 0.5)) * ke.weight * ke.confidence END)
+                  / NULLIF(SUM(CASE WHEN ke.edge_type = 'tests' THEN ke.weight * ke.confidence END), 0),
+                0
+              ) AS weakness,
+              COALESCE(
+                SUM(CASE WHEN ke.edge_type = 'requires' THEN COALESCE(ucs.mastery_score, 0.5) * ke.weight * ke.confidence END)
+                  / NULLIF(SUM(CASE WHEN ke.edge_type = 'requires' THEN ke.weight * ke.confidence END), 0),
+                1
+              ) AS prerequisite_readiness,
+              COALESCE(AVG(COALESCE(ucs.evidence_count, 0)), 0) AS evidence_count,
+              MAX(ucs.last_attempted_at) AS last_attempted_at,
               MAX(CASE WHEN ucs.review_due_at IS NOT NULL AND ucs.review_due_at <= datetime('now') THEN 1 ELSE 0 END) AS review_due,
               EXISTS(SELECT 1 FROM attempts a WHERE a.user_id = ? AND a.problem_id = p.id) AS has_attempt,
               EXISTS(
@@ -435,7 +499,13 @@ export async function buildRecommendations(db: D1Database, userId: string, mode:
        WHERE p.status = 'reviewed'
          AND sd.source_status = 'active'
          AND sd.access_scope IN ('source_link_only', 'public_ready')
-         AND sd.source_url IS NOT NULL AND sd.source_url <> ''
+         AND (
+           (sd.source_url IS NOT NULL AND sd.source_url <> '' AND LOWER(sd.source_url) LIKE 'https://%')
+           OR EXISTS (
+             SELECT 1 FROM diagnostic_problem_contents dpc
+             WHERE dpc.problem_id = p.id AND dpc.status = 'approved' AND dpc.materialized_at IS NOT NULL
+           )
+         )
        GROUP BY p.id`,
     )
     .bind(userId, userId, userId)
@@ -443,10 +513,21 @@ export async function buildRecommendations(db: D1Database, userId: string, mode:
 
   await db.prepare("DELETE FROM recommendation_candidates WHERE user_id = ? AND mode = ?").bind(userId, mode).run();
 
-  const candidates: Array<{ problemId: string; score: number; reasons: string[]; targetMatch: number }> = [];
+  const candidates: Array<{
+    problemId: string;
+    score: number;
+    reasons: string[];
+    targetMatch: number;
+    predictedSuccess: number;
+    baselineSuccess: number;
+    predictionConfidence: number;
+  }> = [];
   for (const problem of problems.results) {
-    const weakness = Number(problem.weakness ?? 0);
-    const prerequisiteReadiness = Number(problem.prerequisite_readiness ?? 1);
+    const evidenceCount = Math.round(Number(problem.evidence_count ?? 0));
+    const lastAttemptedAt = problem.last_attempted_at ? String(problem.last_attempted_at) : null;
+    const rawMastery = 1 - Number(problem.weakness ?? 0);
+    const weakness = 1 - conservativeMastery(rawMastery, evidenceCount, lastAttemptedAt);
+    const prerequisiteReadiness = conservativeMastery(Number(problem.prerequisite_readiness ?? 1), evidenceCount, lastAttemptedAt);
     const reviewDue = Number(problem.review_due ?? 0);
     const difficulty = Number(problem.difficulty);
 
@@ -485,9 +566,18 @@ export async function buildRecommendations(db: D1Database, userId: string, mode:
       weakness >= 0.5 ? "弱点Conceptに一致" : "Concept演習",
       prerequisiteReadiness < 0.35 ? "前提補修" : "前提知識は演習可能",
       reviewDue ? "復習期限" : null,
-      "推薦ロジック v3",
+      evidenceCount < 3 ? "推定の確度を確認" : null,
+      RECOMMENDATION_MODEL_LABEL,
     ].filter((reason): reason is string => Boolean(reason));
-    candidates.push({ problemId: String(problem.id), score, reasons, targetMatch });
+    candidates.push({
+      problemId: String(problem.id),
+      score,
+      reasons,
+      targetMatch,
+      predictedSuccess: predictedSuccess({ mastery: 1 - weakness, prerequisiteReadiness, difficulty }),
+      baselineSuccess: Number(user?.baseline_success ?? 0.5),
+      predictionConfidence: masteryConfidence(evidenceCount, lastAttemptedAt),
+    });
   }
 
   const hasFieldMatches = mode !== "review" && candidates.some((candidate) => candidate.targetMatch >= 0.8);
@@ -495,11 +585,137 @@ export async function buildRecommendations(db: D1Database, userId: string, mode:
     .filter((candidate) => !hasFieldMatches || candidate.targetMatch >= 0.8)
     .sort((left, right) => right.score - left.score || left.problemId.localeCompare(right.problemId))
     .slice(0, 100);
-  for (let start = 0; start < rankedCandidates.length; start += 15) {
-    const chunk = rankedCandidates.slice(start, start + 15);
-    const values = chunk.map(() => "(?, ?, ?, ?, ?)").join(", ");
-    const bindings = chunk.flatMap((candidate) => [userId, candidate.problemId, mode, candidate.score, JSON.stringify(candidate.reasons)]);
-    await db.prepare(`INSERT INTO recommendation_candidates (user_id, problem_id, mode, score, reasons) VALUES ${values}`).bind(...bindings).run();
+  for (let start = 0; start < rankedCandidates.length; start += 10) {
+    const chunk = rankedCandidates.slice(start, start + 10);
+    const values = chunk.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?)").join(", ");
+    const bindings = chunk.flatMap((candidate) => [
+      userId,
+      candidate.problemId,
+      mode,
+      candidate.score,
+      JSON.stringify(candidate.reasons),
+      RECOMMENDATION_MODEL_VERSION,
+      candidate.predictedSuccess,
+      candidate.baselineSuccess,
+      candidate.predictionConfidence,
+    ]);
+    await db.prepare(
+      `INSERT INTO recommendation_candidates (
+        user_id, problem_id, mode, score, reasons, model_version,
+        predicted_success, baseline_success, prediction_confidence
+      ) VALUES ${values}`,
+    ).bind(...bindings).run();
+  }
+}
+
+async function recordRecommendationExposures(
+  db: D1Database,
+  userId: string,
+  mode: RecommendationMode,
+  rows: RecommendationRow[],
+): Promise<void> {
+  if (rows.length === 0) return;
+  const problemIds = [...new Set(rows.map((row) => row.id))];
+  const placeholders = problemIds.map(() => "?").join(",");
+  const contradictory = await db.prepare(
+    `SELECT DISTINCT nr_problem.entity_id AS problem_id
+     FROM knowledge_edges ke
+     JOIN node_registry nr_problem ON nr_problem.node_id = ke.from_node_id
+       AND nr_problem.entity_type = 'problem'
+     JOIN node_registry nr_concept ON nr_concept.node_id = ke.to_node_id
+       AND nr_concept.entity_type = 'concept'
+     JOIN (
+       SELECT concept_id
+       FROM learning_mastery_shadow_evidence
+       WHERE user_id = ? AND created_at >= datetime('now', '-365 days')
+       GROUP BY concept_id
+       HAVING COUNT(*) >= 3 AND (
+         MAX(raw_evidence) - MIN(raw_evidence) >= 0.6
+         OR AVG(raw_evidence * raw_evidence) - AVG(raw_evidence) * AVG(raw_evidence) >= 0.09
+       )
+     ) conflict ON conflict.concept_id = nr_concept.entity_id
+     WHERE ke.status = 'approved' AND ke.edge_type = 'tests'
+       AND nr_problem.entity_id IN (${placeholders})`,
+  ).bind(userId, ...problemIds).all<{ problem_id: string }>();
+  const contradictoryProblemIds = new Set(contradictory.results.map((row) => row.problem_id));
+  const calibration = await db.prepare(
+    `SELECT COUNT(*) AS observations,
+            AVG(observed_score - personalized_prediction) AS mean_residual
+     FROM learning_model_predictions
+     WHERE user_id = ? AND model_version = ? AND observed_score IS NOT NULL
+       AND observed_at >= datetime('now', '-365 days') AND observed_at < ?`,
+  ).bind(userId, RECOMMENDATION_MODEL_VERSION, new Date().toISOString()).first<{
+    observations: number;
+    mean_residual: number | null;
+  }>();
+  const calibrationOffset = personalCalibrationOffset(
+    Number(calibration?.observations ?? 0),
+    Number(calibration?.mean_residual ?? Number.NaN),
+  );
+  await db
+    .prepare("DELETE FROM learning_model_predictions WHERE user_id = ? AND exposed_at < datetime('now', '-400 days')")
+    .bind(userId)
+    .run();
+  const exposedAt = new Date().toISOString();
+  const exposureDate = new Date(Date.parse(exposedAt) + 9 * 60 * 60 * 1_000).toISOString().slice(0, 10);
+  const rankedRows = rows.map((row, index) => ({ row, rankPosition: index + 1 }));
+  for (let start = 0; start < rankedRows.length; start += 8) {
+    const chunk = rankedRows.slice(start, start + 8).filter(
+      ({ row }) => row.predicted_success !== null && row.baseline_success !== null && row.prediction_confidence !== null,
+    );
+    if (chunk.length === 0) continue;
+    const values = chunk.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").join(", ");
+    const bindings = chunk.flatMap(({ row, rankPosition }) => [
+      crypto.randomUUID(),
+      userId,
+      row.id,
+      mode,
+      row.model_version,
+      row.predicted_success,
+      row.baseline_success,
+      row.prediction_confidence,
+      rankPosition,
+      row.score,
+      exposureDate,
+      exposedAt,
+    ]);
+    await db.prepare(
+      `INSERT OR IGNORE INTO learning_model_predictions (
+        id, user_id, problem_id, mode, model_version, personalized_prediction,
+        baseline_prediction, prediction_confidence, rank_position, recommendation_score,
+        exposure_date, exposed_at
+      ) VALUES ${values}`,
+    ).bind(...bindings).run();
+
+    const shadowStatements = chunk.flatMap(({ row }) =>
+      buildShadowPredictions({
+        personalizedPrediction: row.predicted_success!,
+        baselinePrediction: row.baseline_success!,
+        predictionConfidence: row.prediction_confidence!,
+        evidenceConflict: contradictoryProblemIds.has(row.id),
+        personalCalibrationOffset: calibrationOffset,
+      }).map((candidate) =>
+        db.prepare(
+          `INSERT OR IGNORE INTO learning_model_shadow_predictions (
+             prediction_id, candidate_version, hypothesis_id, candidate_label, predicted_success
+           )
+           SELECT id, ?, ?, ?, ? FROM learning_model_predictions
+           WHERE user_id = ? AND problem_id = ? AND mode = ? AND model_version = ? AND exposure_date = ?
+           LIMIT 1`,
+        ).bind(
+          candidate.candidateVersion,
+          candidate.hypothesisId,
+          candidate.label,
+          candidate.predictedSuccess,
+          userId,
+          row.id,
+          mode,
+          row.model_version,
+          exposureDate,
+        ),
+      ),
+    );
+    if (shadowStatements.length > 0) await db.batch(shadowStatements);
   }
 }
 
@@ -521,7 +737,8 @@ export async function listRecommendations(
               sd.university, sd.graduate_school, sd.department, sd.exam_year, sd.source_url,
               sd.publisher_page_url, sd.pdf_display_mode, sd.source_status,
               p.subject_raw, p.difficulty, p.estimated_minutes, p.answer_format, p.status,
-              p.answer_text, p.explanation_text, rc.score, rc.reasons,
+              p.answer_text, p.explanation_text, rc.score, rc.reasons, rc.model_version,
+              rc.predicted_success, rc.baseline_success, rc.prediction_confidence,
               CASE WHEN EXISTS (
                 SELECT 1 FROM attempts a WHERE a.problem_id = p.id AND a.user_id = ?
               ) THEN 1 ELSE 0 END AS completed
@@ -535,11 +752,13 @@ export async function listRecommendations(
        LIMIT ?`,
     )
     .bind(user.id, user.id, mode, limit)
-    .all<ProblemRow & { score: number; reasons: string }>();
+    .all<RecommendationRow>();
 
-  const reasonsAreCurrent = rows.results.some((row) => {
+  const reasonsAreCurrent = rows.results.length > 0 && rows.results.every((row) => {
     const reasons = parseJsonArray<string>(row.reasons);
-    return reasons.includes(modeReason) && reasons.includes("推薦ロジック v3");
+    return reasons.includes(modeReason)
+      && reasons.includes(RECOMMENDATION_MODEL_LABEL)
+      && row.model_version === RECOMMENDATION_MODEL_VERSION;
   });
   if (rows.results.length === 0 || !reasonsAreCurrent) {
     await buildRecommendations(db, user.id, mode);
@@ -549,7 +768,8 @@ export async function listRecommendations(
                 sd.university, sd.graduate_school, sd.department, sd.exam_year, sd.source_url,
                 sd.publisher_page_url, sd.pdf_display_mode, sd.source_status,
                 p.subject_raw, p.difficulty, p.estimated_minutes, p.answer_format, p.status,
-                p.answer_text, p.explanation_text, rc.score, rc.reasons,
+                p.answer_text, p.explanation_text, rc.score, rc.reasons, rc.model_version,
+                rc.predicted_success, rc.baseline_success, rc.prediction_confidence,
                 CASE WHEN EXISTS (
                   SELECT 1 FROM attempts a WHERE a.problem_id = p.id AND a.user_id = ?
                 ) THEN 1 ELSE 0 END AS completed
@@ -563,9 +783,10 @@ export async function listRecommendations(
          LIMIT ?`,
       )
       .bind(user.id, user.id, mode, limit)
-      .all<ProblemRow & { score: number; reasons: string }>();
+      .all<RecommendationRow>();
   }
 
+  await recordRecommendationExposures(db, user.id, mode, rows.results);
   const withConcepts = await attachConcepts(db, rows.results, user.id);
   return withConcepts.map((problem, index) => ({
     ...problem,

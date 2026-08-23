@@ -4,6 +4,9 @@ import type { AttemptInput, RecommendationMode } from "./domain";
 const ATTEMPT_RESULTS = ["not_checked", "correct", "partial", "wrong", "skipped"] as const;
 const MISTAKE_TYPES = ["concept_missing", "formula_missing", "calculation_error", "proof_gap", "misread_problem", "time_over", "implementation_error", "unknown"] as const;
 
+export const RECOMMENDATION_MODEL_VERSION = "recommendation-v4";
+export const RECOMMENDATION_MODEL_LABEL = "推薦ロジック v4";
+
 export function attemptInputError(input: unknown): string | null {
   if (!input || typeof input !== "object" || Array.isArray(input)) return "学習記録の形式が正しくありません。";
   const candidate = input as Partial<AttemptInput>;
@@ -53,9 +56,21 @@ export function effectiveScore(input: MasteryUpdateInput): number {
   return clamp(score, 0, 1);
 }
 
-export function nextMastery(previous: number | null | undefined, evidence: number): number {
+export function nextMastery(previous: number | null | undefined, evidence: number, evidenceCount?: number): number {
   if (previous === null || previous === undefined) return evidence;
-  return clamp(previous * 0.75 + evidence * 0.25, 0, 1);
+  const learningRate = evidenceCount === undefined
+    ? 0.25
+    : Math.max(0.12, 1 / (Math.min(Math.max(evidenceCount, 1), 10) + 1));
+  return clamp(previous * (1 - learningRate) + evidence * learningRate, 0, 1);
+}
+
+export function relevanceAdjustedEvidence(
+  evidence: number,
+  previousMastery: number | null | undefined,
+  relevanceWeight: number,
+): number {
+  const baseline = previousMastery ?? 0.5;
+  return clamp(baseline + (evidence - baseline) * clamp(relevanceWeight, 0, 1), 0, 1);
 }
 
 export function reviewDueIso(score: number, now = new Date()): string {
@@ -130,7 +145,11 @@ export interface RecommendationModeInput {
 export function recommendationModeEligible(mode: RecommendationMode, input: RecommendationModeInput): boolean {
   if (mode === "review") return input.reviewDue > 0 || input.hasAttempt;
   if (input.recentlyMastered) return false;
-  if (mode === "foundation") return input.difficulty <= 2 || input.prerequisiteReadiness < 0.5;
+  if (mode === "foundation") {
+    return input.difficulty <= 2
+      || input.prerequisiteReadiness < 0.6
+      || (input.difficulty <= 3 && input.weakness >= 0.5);
+  }
   if (mode === "challenge") return input.difficulty >= 4 && input.prerequisiteReadiness >= 0.5;
   return input.difficulty >= 2 && input.difficulty <= 3 && input.prerequisiteReadiness >= 0.35 && input.reviewDue === 0;
 }
@@ -153,6 +172,22 @@ export function recommendationModeScore(mode: RecommendationMode, input: Recomme
     reviewDue: input.reviewDue,
     similarConnection: 0.3,
   });
+}
+
+export function predictedSuccess(input: {
+  mastery: number;
+  prerequisiteReadiness: number;
+  difficulty: number;
+}): number {
+  const normalizedDifficulty = clamp((input.difficulty - 1) / 4, 0, 1);
+  return clamp(
+    input.mastery * 0.6
+      + input.prerequisiteReadiness * 0.25
+      + 0.15
+      - normalizedDifficulty * 0.18,
+    0,
+    1,
+  );
 }
 
 const ACADEMIC_FIELD_KEYWORDS = [

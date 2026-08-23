@@ -5,6 +5,7 @@ import {
   BookOpen,
   CircleAlert,
   CheckCircle2,
+  ChartNoAxesCombined,
   ChevronLeft,
   ChevronRight,
   ClipboardList,
@@ -30,13 +31,19 @@ import {
 import { api } from "./api";
 import type { Concept, LearningGraphSubject, Problem, ProblemDetail, Recommendation, SourceDocument, SourceStats, StudyGoal, StudyPlanResponse, User } from "./types";
 import { SolveWorkspacePage } from "./SolveWorkspace";
+import { PersonalAnalyticsPage } from "./PersonalAnalyticsView";
+import { ModelHealthPage } from "./ModelHealthView";
+import { DiagnosticContentAdmin } from "./DiagnosticContentAdmin";
+import { DiagnosticBlueprintAdmin } from "./DiagnosticBlueprintAdmin";
+import { DiagnosticProblemContentAdmin } from "./DiagnosticProblemContentAdmin";
 import "./styles.css";
 
-type View = "home" | "concepts" | "study-plan" | "admin";
+type View = "home" | "concepts" | "study-plan" | "analytics" | "model-health" | "admin";
+type RecommendationMode = "normal" | "review" | "foundation" | "challenge";
 
 function initialView(): View {
   const candidate = new URLSearchParams(window.location.search).get("view");
-  return candidate === "concepts" || candidate === "study-plan" || candidate === "admin" ? candidate : "home";
+  return candidate === "concepts" || candidate === "study-plan" || candidate === "analytics" || candidate === "model-health" || candidate === "admin" ? candidate : "home";
 }
 
 const STATUS_LABELS: Record<string, string> = {
@@ -71,6 +78,10 @@ function canManageSources(user: User | null): boolean {
 
 function canReviewSources(user: User): boolean {
   return user.role === "reviewer" || user.role === "admin";
+}
+
+function canMonitorModels(user: User | null): boolean {
+  return user?.role === "reviewer" || user?.role === "admin";
 }
 
 const SUBJECT_GROUPS = [
@@ -165,6 +176,7 @@ function App() {
   const [studyPlan, setStudyPlan] = useState<StudyPlanResponse | null>(null);
   const [learningGraphSubjects, setLearningGraphSubjects] = useState<LearningGraphSubject[]>([]);
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
+  const [dashboardRecommendationMode, setDashboardRecommendationMode] = useState<RecommendationMode>("normal");
   const [progress, setProgress] = useState<Array<Concept & { evidence_count: number; review_due_at: string | null }>>([]);
   const [busy, setBusy] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
@@ -196,6 +208,7 @@ function App() {
       setLearningGraphSubjects(graphSubjectData.subjects);
       setRecommendations(recommendationData.recommendations);
       if (view === "admin" && session.user.role === "member") setView("home");
+      if (view === "model-health" && !canMonitorModels(session.user)) setView("home");
     } catch (error) {
       const message = error instanceof Error ? error.message : "初期化に失敗しました";
       if (message.includes("Authentication required")) {
@@ -290,6 +303,8 @@ function App() {
           <NavButton active={view === "home"} icon={<Home />} label="ホーム" onClick={() => setView("home")} />
           <NavButton active={view === "concepts"} icon={<GitBranch />} label="分野から探す" onClick={() => setView("concepts")} />
           <NavButton active={view === "study-plan"} icon={<Target />} label="学習計画" onClick={() => setView("study-plan")} />
+          <NavButton active={view === "analytics"} icon={<ChartNoAxesCombined />} label="学習分析" onClick={() => setView("analytics")} />
+          {canMonitorModels(user) ? <NavButton active={view === "model-health"} icon={<ShieldCheck />} label="モデル監視" onClick={() => setView("model-health")} /> : null}
           {canManageSources(user) ? <NavButton active={view === "admin"} icon={<Settings />} label="資料管理" onClick={() => setView("admin")} /> : null}
         </nav>
       </aside> : null}
@@ -337,6 +352,7 @@ function App() {
             weakConcepts={weakConcepts}
             progress={progress}
             initialRecommendations={recommendations}
+            initialRecommendationMode={dashboardRecommendationMode}
             onDepartment={updateDepartment}
             onProblem={openProblem}
             onView={setView}
@@ -379,6 +395,25 @@ function App() {
             onBrowseConcept={browseStudyPlanConcept}
           />
         )}
+
+        {!authRequired && view === "analytics" && <PersonalAnalyticsPage
+          onPractice={(mode) => {
+            setDashboardRecommendationMode(mode);
+            setView("home");
+          }}
+          onStudyPlan={() => setView("study-plan")}
+          onScheduleAdapted={(goal, plan) => {
+            setStudyGoal(goal);
+            setStudyPlan(plan);
+            setView("study-plan");
+          }}
+          onPlanFocused={(plan) => {
+            setStudyPlan(plan);
+            setView("study-plan");
+          }}
+        />}
+
+        {!authRequired && view === "model-health" && user && canMonitorModels(user) && <ModelHealthPage user={user} />}
 
         {!authRequired && view === "admin" && user && canManageSources(user) && <AdminPanel user={user} onCreated={bootstrap} />}
         {problemModalOpen && selectedProblem ? (
@@ -532,6 +567,7 @@ function Dashboard({
   weakConcepts,
   progress,
   initialRecommendations,
+  initialRecommendationMode,
   onDepartment,
   onProblem,
   onView,
@@ -541,12 +577,13 @@ function Dashboard({
   weakConcepts: Concept[];
   progress: Array<Concept & { evidence_count: number; review_due_at: string | null }>;
   initialRecommendations: Recommendation[];
+  initialRecommendationMode: RecommendationMode;
   onDepartment: (department: string) => Promise<void>;
   onProblem: (id: string) => Promise<void>;
   onView: (view: View) => void;
 }) {
-  const [recommendationMode, setRecommendationMode] = useState<"normal" | "review" | "foundation" | "challenge">("normal");
-  const [recommendationItems, setRecommendationItems] = useState(initialRecommendations);
+  const [recommendationMode, setRecommendationMode] = useState<RecommendationMode>(initialRecommendationMode);
+  const [recommendationItems, setRecommendationItems] = useState(initialRecommendationMode === "normal" ? initialRecommendations : []);
   const [recommendationBusy, setRecommendationBusy] = useState(false);
   const [recommendationError, setRecommendationError] = useState<string | null>(null);
   const [departmentEditing, setDepartmentEditing] = useState(!user?.department);
@@ -561,6 +598,9 @@ function Dashboard({
   ] as const;
 
   useEffect(() => setRecommendationItems(initialRecommendations), [initialRecommendations]);
+  useEffect(() => {
+    if (initialRecommendationMode !== "normal") void changeRecommendationMode(initialRecommendationMode);
+  }, []);
 
   async function changeRecommendationMode(mode: typeof recommendationMode) {
     setRecommendationMode(mode);
@@ -839,7 +879,7 @@ function ProblemPreviewPanel({
   }, [editingMemo, problem?.explanation_text]);
 
   if (!problem) return <div className="panel detail-panel empty">問題を選択してください。</div>;
-  const editable = canEditProblem(user);
+  const editable = canEditProblem(user) && !problem.governed_original;
   const explanationText = memoDraft.trim();
 
   async function saveExplanationMemo() {
@@ -870,20 +910,17 @@ function ProblemPreviewPanel({
         </div>
         <div className="difficulty">難易度 {problem.difficulty} / {problem.estimated_minutes}分</div>
       </div>
-      <section className="pdf-block">
-        <div className="pdf-toolbar">
-          <div>
-            <strong>問題PDF</strong>
-            <span>{pageLabel(problem)}を開いています</span>
-          </div>
-        </div>
-        {problem.source_url ? (
-          <ExternalPdfViewer problem={problem} pageNumber={problem.page_start ?? 1} compact />
-        ) : (
-          <div className="pdf-missing">この問題にはPDFリンクがまだ登録されていません。</div>
-        )}
-      </section>
-      {problem.statement_text ? (
+      {problem.source_url ? <section className="pdf-block">
+        <div className="pdf-toolbar"><div><strong>問題PDF</strong><span>{pageLabel(problem)}を開いています</span></div></div>
+        <ExternalPdfViewer problem={problem} pageNumber={problem.page_start ?? 1} compact />
+      </section> : (
+        <section className="original-problem-block" aria-label="オリジナル診断問題">
+          <span>ORIGINAL DIAGNOSTIC ITEM</span>
+          <h2>{problem.problem_label}</h2>
+          <p>{problem.statement_text}</p>
+        </section>
+      )}
+      {problem.source_url && problem.statement_text ? (
         <details className="statement-details">
           <summary>登録メモを表示</summary>
           <p className="statement">{problem.statement_text}</p>
@@ -1113,7 +1150,8 @@ function StudyPlanView({ goal, studyPlan, availableSubjects, onGoal, onPlan, onS
     .filter((subject) => availableSubjectKeys.has(subject.id))
     .map((subject) => subject.label);
   const pendingPlanItems = studyPlan?.items.filter((item) => item.status === "pending") ?? [];
-  const completedPlanItemCount = studyPlan?.items.filter((item) => item.status !== "pending").length ?? 0;
+  const completedPlanItemCount = studyPlan?.items.filter((item) => item.status === "completed").length ?? 0;
+  const skippedPlanItemCount = studyPlan?.items.filter((item) => item.status === "skipped").length ?? 0;
 
   useEffect(() => {
     if (!goal) return;
@@ -1234,6 +1272,7 @@ function StudyPlanView({ goal, studyPlan, availableSubjects, onGoal, onPlan, onS
                       <div><strong>{node.label}</strong><span>{node.status === "completed" ? "習得済み" : node.status === "ready" ? "学習可能" : "前提待ち"}</span></div>
                       <p>{node.description}</p>
                       <meter min={0} max={1} value={node.mastery} />
+                      <small>{node.mastery_basis === "prior" ? "記録なし・中立値で表示" : `証拠 ${node.evidence_count}件・保守推定`}</small>
                     </article>
                   ))}</div>
                 </section>
@@ -1244,6 +1283,7 @@ function StudyPlanView({ goal, studyPlan, availableSubjects, onGoal, onPlan, onS
           <div className="panel study-schedule">
             <PanelTitle icon={<ClipboardList />} title="これからの14日間" />
             {completedPlanItemCount > 0 ? <p className="study-schedule-summary">この計画で完了済み: {completedPlanItemCount}件</p> : null}
+            {skippedPlanItemCount > 0 ? <p className="study-schedule-summary">見送り: {skippedPlanItemCount}件</p> : null}
             <div className="study-session-list">
               {pendingPlanItems.map((item) => (
                 <article key={item.id} className={`study-session ${item.status}`}>
@@ -1412,6 +1452,10 @@ function AdminPanel({ user, onCreated }: { user: User; onCreated: () => Promise<
 
       {status ? <div className="form-status success" role="status">{status}</div> : null}
       {error ? <div className="form-status error" role="alert">{error}</div> : null}
+
+      <DiagnosticContentAdmin user={user} onChanged={onCreated} />
+      <DiagnosticBlueprintAdmin user={user} />
+      <DiagnosticProblemContentAdmin user={user} />
 
       <details className="panel source-create-panel">
         <summary><span><FilePlus2 />新しい公式資料を登録</span><small>PDFファイルは保存せず、公開元URLだけを登録します</small><ChevronRight /></summary>

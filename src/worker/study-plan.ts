@@ -1,6 +1,15 @@
 import type { AppUser, ConceptSummary, ProblemListItem, RecommendationMode } from "./domain";
+import {
+  buildDiagnosticChoicePolicy,
+  loadDiagnosticProblemSignals,
+  rankDiagnosticProblems,
+  type DiagnosticChoicePolicy,
+  recordDiagnosticItemExposure,
+} from "./diagnostic-items";
 import { ulid } from "./id";
 import { parseJsonArray } from "./json";
+import { activeInformationGainPolicy, buildExplorationNodeSequence, type InformationGainNodeSignal } from "./information-gain";
+import { activePlanFocusNodeIds, buildFocusedNodeSequence, type PlanFocusNodeSignal } from "./plan-focus";
 import { attachConcepts } from "./repository";
 import { recommendationModeEligible, recommendationModeScore } from "./scoring";
 
@@ -35,6 +44,8 @@ export interface StudyPlanNode {
   layer: number;
   description: string;
   mastery: number;
+  evidence_count: number;
+  mastery_basis: "prior" | "observed";
   readiness: number;
   status: "completed" | "ready" | "blocked";
   prerequisites: Array<{ id: string; label: string; weight: number; mastery: number }>;
@@ -49,6 +60,8 @@ export interface StudyPlanItem {
   estimated_minutes: number;
   mode: RecommendationMode | "concept";
   status: "pending" | "completed" | "skipped";
+  superseded_at: string | null;
+  superseded_reason: "overdue_replanned" | null;
   reason: string;
   problem?: ProblemListItem;
   concepts?: ConceptSummary[];
@@ -80,6 +93,7 @@ type CandidateProblemRow = Omit<ProblemListItem, "concepts" | "completed"> & {
   review_due: number;
   has_attempt: number;
   recently_mastered: number;
+  explicitly_linked: number;
 };
 
 const DAY_MS = 86_400_000;
@@ -207,6 +221,18 @@ export function evaluateNodeReadiness(
   };
 }
 
+/**
+ * Shrink sparse observations toward a neutral prior. This prevents one early
+ * result from being presented as a stable weakness while still converging to
+ * the observed mastery as evidence accumulates.
+ */
+export function conservativeNodeMastery(observedMastery: number | null, evidenceCount: number, priorWeight = 3): number {
+  if (observedMastery === null || evidenceCount <= 0) return 0.5;
+  const evidence = Math.max(0, evidenceCount);
+  const prior = Math.max(0, priorWeight);
+  return Math.min(1, Math.max(0, (observedMastery * evidence + 0.5 * prior) / (evidence + prior)));
+}
+
 export function buildScheduledDays(start: Date, sessionsPerWeek: number): string[] {
   const days: string[] = [];
   for (let week = 0; week < 2; week += 1) {
@@ -216,6 +242,10 @@ export function buildScheduledDays(start: Date, sessionsPerWeek: number): string
     }
   }
   return days;
+}
+
+export function conceptSessionMinutes(configuredMinutes: number): number {
+  return Math.min(180, Math.max(15, Math.round(configuredMinutes)));
 }
 
 function isoDay(date: Date): string {
@@ -266,6 +296,22 @@ export async function upsertStudyGoal(db: D1Database, userId: string, input: Stu
   const now = new Date().toISOString();
   await db.batch([
     db.prepare("UPDATE user_goals SET is_active = 0, updated_at = ? WHERE user_id = ? AND id <> ?").bind(now, userId, goalId),
+    db.prepare(
+      `UPDATE learning_schedule_adaptation_experiments SET cancelled_at = ?
+       WHERE user_id = ? AND completed_at IS NULL AND cancelled_at IS NULL`,
+    ).bind(now, userId),
+    db.prepare(
+      `UPDATE learning_plan_focus_experiments SET cancelled_at = ?
+       WHERE user_id = ? AND completed_at IS NULL AND cancelled_at IS NULL`,
+    ).bind(now, userId),
+    db.prepare(
+      `UPDATE learning_information_gain_experiments SET cancelled_at = ?
+       WHERE user_id = ? AND completed_at IS NULL AND cancelled_at IS NULL`,
+    ).bind(now, userId),
+    db.prepare(
+      `UPDATE learning_diagnostic_item_exposures SET cancelled_at = ?
+       WHERE user_id = ? AND observed_at IS NULL AND cancelled_at IS NULL`,
+    ).bind(now, userId),
     db.prepare(
       `INSERT INTO user_goals (
         id, user_id, target_university, target_graduate_school, target_department, exam_month,
@@ -339,9 +385,11 @@ async function loadGraphState(db: D1Database, graphId: string, userId: string) {
   const [nodesResult, edgesResult] = await Promise.all([
     db.prepare(
       `SELECT n.id, n.label, n.node_type, n.layer, n.description, n.sort_index,
-              CASE WHEN COUNT(l.concept_id) = 0 THEN 0
-                   ELSE SUM(COALESCE(ucs.mastery_score, 0) * l.confidence) / SUM(l.confidence) END AS mastery,
-              COALESCE(SUM(CASE WHEN ucs.evidence_count > 0 THEN 1 ELSE 0 END), 0) AS evidence_count,
+              SUM(CASE WHEN ucs.evidence_count > 0
+                       THEN ucs.mastery_score * l.confidence * MIN(ucs.evidence_count, 10) END)
+                / NULLIF(SUM(CASE WHEN ucs.evidence_count > 0
+                                  THEN l.confidence * MIN(ucs.evidence_count, 10) END), 0) AS mastery,
+              COALESCE(SUM(ucs.evidence_count), 0) AS evidence_count,
               MAX(CASE WHEN ucs.review_due_at IS NOT NULL AND ucs.review_due_at <= datetime('now') THEN 1 ELSE 0 END) AS review_due,
               COALESCE((SELECT SUM(e2.weight) FROM learning_graph_edges e2 WHERE e2.graph_id = n.graph_id AND e2.source_node_id = n.id), 0) AS downstream_weight
        FROM learning_graph_nodes n
@@ -359,7 +407,10 @@ async function loadGraphState(db: D1Database, graphId: string, userId: string) {
     ).bind(graphId).all<GraphEdgeRow>(),
   ]);
 
-  const masteryByNode = new Map(nodesResult.results.map((node) => [node.id, Number(node.mastery ?? 0)]));
+  const masteryByNode = new Map(nodesResult.results.map((node) => [
+    node.id,
+    conservativeNodeMastery(node.mastery == null ? null : Number(node.mastery), Number(node.evidence_count)),
+  ]));
   const edgesByTarget = new Map<string, GraphEdgeRow[]>();
   for (const edge of edgesResult.results) {
     const edges = edgesByTarget.get(edge.target_node_id) ?? [];
@@ -374,7 +425,8 @@ async function loadGraphState(db: D1Database, graphId: string, userId: string) {
       weight: Number(edge.weight),
       mastery: masteryByNode.get(edge.source_node_id) ?? 0,
     }));
-    const mastery = Number(node.mastery ?? 0);
+    const evidenceCount = Number(node.evidence_count);
+    const mastery = conservativeNodeMastery(node.mastery == null ? null : Number(node.mastery), evidenceCount);
     const readinessResult = evaluateNodeReadiness(mastery, prerequisites);
     return {
       id: node.id,
@@ -383,6 +435,8 @@ async function loadGraphState(db: D1Database, graphId: string, userId: string) {
       layer: Number(node.layer),
       description: node.description,
       mastery,
+      evidence_count: evidenceCount,
+      mastery_basis: evidenceCount > 0 ? "observed" : "prior",
       readiness: readinessResult.readiness,
       status: readinessResult.status,
       prerequisites,
@@ -403,7 +457,7 @@ async function loadGraphState(db: D1Database, graphId: string, userId: string) {
 }
 
 function modeForNode(node: StudyPlanNode, row: GraphNodeRow): RecommendationMode {
-  if (Number(row.review_due) > 0 || Number(row.evidence_count) > 0) return "review";
+  if (Number(row.review_due) > 0) return "review";
   if (node.mastery < 0.4) return "foundation";
   if (node.mastery >= 0.75 && node.readiness >= 0.6) return "challenge";
   return "normal";
@@ -419,7 +473,13 @@ async function candidateProblems(db: D1Database, graphId: string, userId: string
             CASE WHEN ucs.review_due_at IS NOT NULL AND ucs.review_due_at <= datetime('now') THEN 1 ELSE 0 END AS review_due,
             EXISTS(SELECT 1 FROM attempts a WHERE a.user_id = ? AND a.problem_id = p.id) AS has_attempt,
             EXISTS(SELECT 1 FROM attempts a WHERE a.user_id = ? AND a.problem_id = p.id AND a.score_rate >= 0.85 AND a.created_at >= datetime('now', '-30 days')) AS recently_mastered
+            , EXISTS(
+                SELECT 1 FROM learning_graph_problem_links lgpl
+                WHERE lgpl.graph_node_id = l.graph_node_id AND lgpl.problem_id = p.id
+                  AND lgpl.relation_type = 'direct' AND lgpl.status = 'approved'
+              ) AS explicitly_linked
      FROM learning_graph_concept_links l
+     JOIN concepts mapped_concept ON mapped_concept.id = l.concept_id AND mapped_concept.status = 'active'
      JOIN node_registry nr_concept ON nr_concept.entity_type = 'concept' AND nr_concept.entity_id = l.concept_id
      JOIN knowledge_edges ke ON ke.to_node_id = nr_concept.node_id AND ke.status = 'approved' AND ke.edge_type IN ('tests', 'requires')
      JOIN node_registry nr_problem ON nr_problem.node_id = ke.from_node_id AND nr_problem.entity_type = 'problem'
@@ -427,7 +487,13 @@ async function candidateProblems(db: D1Database, graphId: string, userId: string
      JOIN source_documents sd ON sd.id = p.source_document_id
      LEFT JOIN user_concept_states ucs ON ucs.user_id = ? AND ucs.concept_id = l.concept_id
      WHERE l.status = 'approved' AND l.graph_node_id IN (SELECT id FROM learning_graph_nodes WHERE graph_id = ?)
-       AND sd.source_url IS NOT NULL AND sd.source_url <> ''
+       AND (
+         (sd.source_url IS NOT NULL AND sd.source_url <> '' AND LOWER(sd.source_url) LIKE 'https://%')
+         OR EXISTS (
+           SELECT 1 FROM diagnostic_problem_contents dpc
+           WHERE dpc.problem_id = p.id AND dpc.status = 'approved' AND dpc.materialized_at IS NOT NULL
+         )
+       )
        AND sd.access_scope IN ('source_link_only', 'public_ready')
        AND sd.source_status = 'active'`,
   ).bind(userId, userId, userId, graphId).all<CandidateProblemRow>();
@@ -472,9 +538,13 @@ export async function generateStudyPlan(db: D1Database, user: AppUser) {
   for (const [nodeId, nodeCandidates] of byNode) {
     const node = nodeById.get(nodeId);
     if (!node) continue;
-    const focusedCandidates = nodeCandidates.filter((candidate) =>
-      studyPlanProblemMatchesNode(node.label, candidate.problem_label),
-    );
+    const focusedById = new Map<string, CandidateProblemRow>();
+    for (const candidate of nodeCandidates) {
+      if (Number(candidate.explicitly_linked) !== 1 && !studyPlanProblemMatchesNode(node.label, candidate.problem_label)) continue;
+      const current = focusedById.get(candidate.id);
+      if (!current || Number(candidate.review_due) > Number(current.review_due)) focusedById.set(candidate.id, candidate);
+    }
+    const focusedCandidates = [...focusedById.values()];
     // When an imported graph introduces a label without a focused candidate,
     // surface the mapped concept task instead of guessing from a broad tag.
     if (focusedCandidates.length > 0) byNode.set(nodeId, focusedCandidates);
@@ -490,14 +560,65 @@ export async function generateStudyPlan(db: D1Database, user: AppUser) {
      WHERE plan_id = ? AND problem_id IS NULL AND status IN ('completed', 'skipped')`,
   ).bind(planId).all<{ graph_node_id: string; scheduled_date: string }>();
   const completedConceptKeys = new Set(completedConceptItems.results.map((item) => `${item.graph_node_id}:${item.scheduled_date}`));
-  await db.prepare("DELETE FROM study_plan_items WHERE plan_id = ? AND status = 'pending'").bind(planId).run();
+  // Keep already-missed sessions as evidence. Removing them here would let a
+  // user make plan adherence look perfect simply by regenerating the plan.
+  // Today's and future work has not matured yet, so it can be replaced safely.
+  await db.batch([
+    db.prepare(
+      `UPDATE study_plan_items
+       SET superseded_at = ?, superseded_reason = 'overdue_replanned'
+       WHERE plan_id = ? AND status = 'pending' AND superseded_at IS NULL
+         AND scheduled_date < ?`,
+    ).bind(generatedAt, planId, isoDay(now)),
+    db.prepare(
+      `DELETE FROM study_plan_items
+       WHERE plan_id = ? AND status = 'pending' AND superseded_at IS NULL
+         AND scheduled_date >= ?`,
+    ).bind(planId, isoDay(now)),
+    db.prepare(
+      `DELETE FROM study_plan_items
+       WHERE plan_id = ? AND superseded_at IS NOT NULL
+         AND scheduled_date < date(?, '-180 days')`,
+    ).bind(planId, isoDay(now)),
+  ]);
 
   const days = buildScheduledDays(now, Number(goal.sessions_per_week));
   const readyNodes = nodes.filter((node) => node.status === "ready");
+  const activeFocusIds = await activePlanFocusNodeIds(db, user.id, goal.id);
+  const activeExploration = activeFocusIds.length === 0
+    ? await activeInformationGainPolicy(db, user.id, goal.id)
+    : null;
+  const focusSignals = readyNodes.map((node) => {
+    const row = rowById.get(node.id)!;
+    return {
+      id: node.id,
+      label: node.label,
+      status: node.status,
+      mastery: node.mastery,
+      evidence_count: node.evidence_count,
+      review_due: Number(row.review_due) > 0,
+      downstream_weight: Number(row.downstream_weight),
+      layer: node.layer,
+    } satisfies PlanFocusNodeSignal;
+  });
+  const scheduledNodes = activeFocusIds.length > 0
+    ? buildFocusedNodeSequence(focusSignals, activeFocusIds, days.length)
+    : activeExploration
+      ? buildExplorationNodeSequence(
+          focusSignals.map((node) => ({ ...node, available_problem_count: byNode.get(node.id)?.length ?? 0 })),
+          activeExploration.nodeId,
+          days.length,
+        )
+      : readyNodes;
+  const diagnosticRanking = activeExploration
+    ? rankDiagnosticProblems(await loadDiagnosticProblemSignals(db, user.id, activeExploration.nodeId))
+    : [];
+  let diagnosticExposure: DiagnosticChoicePolicy | null = null;
   const inserts: D1PreparedStatement[] = [];
   let sequence = 0;
-  for (let dayIndex = 0; dayIndex < days.length && readyNodes.length > 0; dayIndex += 1) {
-    const node = readyNodes[dayIndex % readyNodes.length];
+  for (let dayIndex = 0; dayIndex < days.length && scheduledNodes.length > 0; dayIndex += 1) {
+    const scheduledNode = scheduledNodes[dayIndex % scheduledNodes.length];
+    const node = nodeById.get(scheduledNode.id)!;
     const row = rowById.get(node.id)!;
     const mode = modeForNode(node, row);
     // One problem should not fill several sessions in the same two-week plan.
@@ -512,7 +633,7 @@ export async function generateStudyPlan(db: D1Database, user: AppUser) {
       };
       return recommendationModeEligible(mode, input);
     });
-    const modeCandidates = (eligibleProblems.length > 0 ? eligibleProblems : availableProblems).sort((left, right) => {
+    const baselineCandidates = [...(eligibleProblems.length > 0 ? eligibleProblems : availableProblems)].sort((left, right) => {
       const score = (problem: CandidateProblemRow) => recommendationModeScore(mode, {
         difficulty: Number(problem.difficulty), weakness: 1 - node.mastery, targetMatch: 1,
         prerequisiteReadiness: node.readiness, reviewDue: Number(problem.review_due),
@@ -520,15 +641,28 @@ export async function generateStudyPlan(db: D1Database, user: AppUser) {
       }) + targetInstitutionMatch(goal, problem) * 0.35;
       return score(right) - score(left) || left.id.localeCompare(right.id);
     });
+    const isDiagnosticExploration = Boolean(activeExploration && node.id === activeExploration.nodeId);
+    const diagnosticPolicy = isDiagnosticExploration
+      ? buildDiagnosticChoicePolicy(baselineCandidates.map((problem) => problem.id), diagnosticRanking)
+      : null;
+    const modeCandidates = diagnosticPolicy
+      ? [
+          baselineCandidates.find((problem) => problem.id === diagnosticPolicy.selected.problem_id)!,
+          ...baselineCandidates.filter((problem) => problem.id !== diagnosticPolicy.selected.problem_id),
+        ]
+      : baselineCandidates;
     let remaining = Number(goal.minutes_per_session);
     let selected = 0;
     for (const problem of modeCandidates) {
-      if (selected >= 3) break;
+      if (selected >= (isDiagnosticExploration ? 1 : 3)) break;
       if (selected > 0 && Number(problem.estimated_minutes) > remaining * 1.1) continue;
       sequence += 1;
       selected += 1;
       remaining -= Number(problem.estimated_minutes);
       usedIds.add(problem.id);
+      if (isDiagnosticExploration && !diagnosticExposure) {
+        if (diagnosticPolicy && problem.id === diagnosticPolicy.selected.problem_id) diagnosticExposure = diagnosticPolicy;
+      }
       inserts.push(db.prepare(
         `INSERT OR IGNORE INTO study_plan_items (id, plan_id, graph_node_id, problem_id, sequence, scheduled_date, estimated_minutes, mode, status, reason)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
@@ -542,11 +676,93 @@ export async function generateStudyPlan(db: D1Database, user: AppUser) {
       inserts.push(db.prepare(
         `INSERT OR IGNORE INTO study_plan_items (id, plan_id, graph_node_id, problem_id, sequence, scheduled_date, estimated_minutes, mode, status, reason)
          VALUES (?, ?, ?, NULL, ?, ?, ?, 'concept', 'pending', ?)`,
-      ).bind(ulid("spi"), planId, node.id, sequence, days[dayIndex], Math.min(45, Number(goal.minutes_per_session)), `${node.label}の概念学習`));
+      ).bind(ulid("spi"), planId, node.id, sequence, days[dayIndex], conceptSessionMinutes(Number(goal.minutes_per_session)), `${node.label}の概念学習`));
     }
   }
   for (let index = 0; index < inserts.length; index += 50) await db.batch(inserts.slice(index, index + 50));
+  if (activeExploration && diagnosticExposure) {
+    await recordDiagnosticItemExposure(db, {
+      userId: user.id,
+      goalId: goal.id,
+      planId,
+      informationGainExperimentId: activeExploration.experimentId,
+      graphNodeId: activeExploration.nodeId,
+      policy: diagnosticExposure,
+    }, now);
+  }
   return getCurrentStudyPlan(db, user);
+}
+
+export async function getCurrentPlanFocusContext(db: D1Database, userId: string): Promise<{
+  planId: string;
+  goalId: string;
+  sessionCount: number;
+  nodes: InformationGainNodeSignal[];
+} | null> {
+  const plan = await db.prepare(
+    `SELECT id, goal_id, graph_id, sessions_per_week
+     FROM study_plans WHERE user_id = ? AND status = 'active'
+     ORDER BY updated_at DESC LIMIT 1`,
+  ).bind(userId).first<{ id: string; goal_id: string; graph_id: string; sessions_per_week: number }>();
+  if (!plan) return null;
+  const { nodes, rows } = await loadGraphState(db, plan.graph_id, userId);
+  const rowById = new Map(rows.map((row) => [row.id, row]));
+  const [candidates, usedRecently] = await Promise.all([
+    candidateProblems(db, plan.graph_id, userId),
+    db.prepare(
+      `SELECT problem_id FROM study_plan_items
+       WHERE plan_id = ? AND problem_id IS NOT NULL
+         AND status IN ('completed', 'skipped') AND scheduled_date >= date('now', '-14 days')`,
+    ).bind(plan.id).all<{ problem_id: string }>(),
+  ]);
+  const usedIds = new Set(usedRecently.results.map((item) => item.problem_id));
+  const availableByNode = new Map<string, Set<string>>();
+  for (const candidate of candidates) {
+    if (usedIds.has(candidate.id)) continue;
+    const node = nodes.find((item) => item.id === candidate.graph_node_id);
+    if (!node || (Number(candidate.explicitly_linked) !== 1 && !studyPlanProblemMatchesNode(node.label, candidate.problem_label))) continue;
+    const ids = availableByNode.get(node.id) ?? new Set<string>();
+    ids.add(candidate.id);
+    availableByNode.set(node.id, ids);
+  }
+  return {
+    planId: plan.id,
+    goalId: plan.goal_id,
+    sessionCount: Math.max(0, Math.round(Number(plan.sessions_per_week)) * 2),
+    nodes: nodes.map((node) => {
+      const row = rowById.get(node.id)!;
+      return {
+        id: node.id,
+        label: node.label,
+        status: node.status,
+        mastery: node.mastery,
+        evidence_count: node.evidence_count,
+        review_due: Number(row.review_due) > 0,
+        downstream_weight: Number(row.downstream_weight),
+        layer: node.layer,
+        available_problem_count: availableByNode.get(node.id)?.size ?? 0,
+      };
+    }),
+  };
+}
+
+export async function getCurrentFocusMastery(
+  db: D1Database,
+  userId: string,
+  goalId: string,
+  focusNodeIds: readonly string[],
+): Promise<number | null> {
+  const plan = await db.prepare(
+    `SELECT graph_id FROM study_plans
+     WHERE user_id = ? AND goal_id = ? ORDER BY updated_at DESC LIMIT 1`,
+  ).bind(userId, goalId).first<{ graph_id: string }>();
+  if (!plan || focusNodeIds.length === 0) return null;
+  const { nodes } = await loadGraphState(db, plan.graph_id, userId);
+  const focusSet = new Set(focusNodeIds);
+  const focused = nodes.filter((node) => focusSet.has(node.id));
+  if (focused.length === 0) return null;
+  const weight = focused.reduce((sum, node) => sum + Math.max(1, node.evidence_count), 0);
+  return focused.reduce((sum, node) => sum + node.mastery * Math.max(1, node.evidence_count), 0) / weight;
 }
 
 export async function getCurrentStudyPlan(db: D1Database, user: AppUser) {
@@ -561,7 +777,8 @@ export async function getCurrentStudyPlan(db: D1Database, user: AppUser) {
   const { results } = await db.prepare(
     `SELECT spi.*, n.label AS node_label FROM study_plan_items spi
      JOIN learning_graph_nodes n ON n.id = spi.graph_node_id
-     WHERE spi.plan_id = ? ORDER BY spi.scheduled_date, spi.sequence`,
+     WHERE spi.plan_id = ? AND spi.superseded_at IS NULL
+     ORDER BY spi.scheduled_date, spi.sequence`,
   ).bind(String(plan.id)).all<Omit<StudyPlanItem, "problem">>();
   const problemRows = await db.prepare(
     `SELECT DISTINCT p.id, p.problem_label, p.statement_text, p.page_start, p.page_end,
@@ -570,7 +787,7 @@ export async function getCurrentStudyPlan(db: D1Database, user: AppUser) {
             p.answer_format, p.status, p.answer_text, p.explanation_text,
             CASE WHEN EXISTS (SELECT 1 FROM attempts a WHERE a.problem_id = p.id AND a.user_id = ?) THEN 1 ELSE 0 END AS completed
      FROM study_plan_items spi JOIN problems p ON p.id = spi.problem_id JOIN source_documents sd ON sd.id = p.source_document_id
-     WHERE spi.plan_id = ? AND spi.problem_id IS NOT NULL`,
+     WHERE spi.plan_id = ? AND spi.problem_id IS NOT NULL AND spi.superseded_at IS NULL`,
   ).bind(user.id, String(plan.id)).all<Omit<ProblemListItem, "concepts">>();
   const withConcepts = await attachConcepts(db, problemRows.results, user.id);
   const problems = new Map(withConcepts.map((problem) => [problem.id, problem]));
@@ -580,7 +797,13 @@ export async function getCurrentStudyPlan(db: D1Database, user: AppUser) {
               WHEN p.status = 'reviewed'
                AND sd.source_status = 'active'
                AND sd.access_scope IN ('source_link_only', 'public_ready')
-               AND sd.source_url IS NOT NULL AND sd.source_url <> ''
+               AND (
+                 (sd.source_url IS NOT NULL AND sd.source_url <> '' AND LOWER(sd.source_url) LIKE 'https://%')
+                 OR EXISTS (
+                   SELECT 1 FROM diagnostic_problem_contents dpc
+                   WHERE dpc.problem_id = p.id AND dpc.status = 'approved' AND dpc.materialized_at IS NOT NULL
+                 )
+               )
               THEN p.id
             END) AS problem_count
      FROM learning_graph_concept_links l
@@ -632,6 +855,7 @@ export async function completeConceptPlanItem(db: D1Database, userId: string, it
 export async function markPlanItemsForAttempt(db: D1Database, userId: string, problemId: string) {
   await db.prepare(
     `UPDATE study_plan_items SET status = 'completed', completed_at = ?
-     WHERE problem_id = ? AND status = 'pending' AND plan_id IN (SELECT id FROM study_plans WHERE user_id = ? AND status = 'active')`,
+     WHERE problem_id = ? AND status = 'pending' AND superseded_at IS NULL
+       AND plan_id IN (SELECT id FROM study_plans WHERE user_id = ? AND status = 'active')`,
   ).bind(new Date().toISOString(), problemId, userId).run();
 }

@@ -32,6 +32,11 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .solve-pdf-fallback p { margin: 0; color: #637471; }
 .solve-pdf-fallback a { display: inline-flex; align-items: center; gap: 7px; min-height: 42px; padding: 0 15px; border-radius: 8px; color: white; background: #0d776c; font-weight: 800; text-decoration: none; }
 .solve-pdf-fallback svg { width: 18px; }
+.solve-pdf-pane.original { background: linear-gradient(135deg, #eef3f2, #e6f2ef); }
+.solve-original-problem { min-height: calc(100vh - 154px); padding: clamp(28px, 7vw, 92px); border: 1px solid #d7e0de; border-left: 6px solid #0d776c; border-radius: 0 0 10px 10px; background: white; }
+.solve-original-problem > span { color: #0d776c; font-size: 11px; font-weight: 850; letter-spacing: .14em; }
+.solve-original-problem h1 { max-width: 900px; margin: 10px 0 24px; font-size: clamp(24px, 4vw, 40px); }
+.solve-original-problem p { max-width: 900px; margin: 0; font-size: clamp(17px, 2.2vw, 21px); line-height: 2; white-space: pre-wrap; }
 .problem-chat-launcher { position: fixed; right: 22px; bottom: 22px; z-index: 25; display: grid; width: 50px; height: 50px; place-items: center; border: 0; border-radius: 50%; color: white; background: #0d776c; box-shadow: 0 10px 30px rgba(11,70,64,.28); }
 .problem-chat-drawer { position: fixed; inset: 0 0 0 auto; z-index: 40; display: grid; grid-template-rows: auto auto 1fr auto auto; width: min(410px, 100vw); border-left: 1px solid #d7e0de; background: white; box-shadow: -18px 0 50px rgba(18,39,36,.18); }
 .problem-chat-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px; border-bottom: 1px solid #d7e0de; }
