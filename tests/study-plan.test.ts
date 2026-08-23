@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildScheduledDays, evaluateNodeReadiness, excludePreviouslyScheduledProblems, studyPlanProblemMatchesNode, targetInstitutionMatch } from "../src/worker/study-plan";
+import { buildScheduledDays, conceptSessionMinutes, conservativeNodeMastery, evaluateNodeReadiness, excludePreviouslyScheduledProblems, studyPlanProblemMatchesNode, targetInstitutionMatch } from "../src/worker/study-plan";
 
 describe("study plan algorithm", () => {
   it("blocks a node when a required prerequisite is below the mastery threshold", () => {
@@ -16,11 +16,22 @@ describe("study plan algorithm", () => {
     expect(evaluateNodeReadiness(0.8, [{ weight: 1, mastery: 0.1 }]).status).toBe("completed");
   });
 
+  it("uses a neutral prior for unknown nodes and shrinks sparse observations", () => {
+    expect(conservativeNodeMastery(null, 0)).toBe(0.5);
+    expect(conservativeNodeMastery(0, 1)).toBe(0.375);
+    expect(conservativeNodeMastery(0.2, 20)).toBeCloseTo(0.239, 3);
+  });
+
   it("creates exactly two weeks of the selected weekly cadence", () => {
     const days = buildScheduledDays(new Date("2026-08-02T15:00:00.000Z"), 5);
     expect(days).toHaveLength(10);
     expect(new Set(days).size).toBe(10);
     expect(days[0]).toBe("2026-08-03");
+  });
+
+  it("keeps configured session duration available for a consolidated concept session", () => {
+    expect(conceptSessionMinutes(115)).toBe(115);
+    expect(conceptSessionMinutes(200)).toBe(180);
   });
 
   it("uses the Japanese calendar day around UTC midnight", () => {

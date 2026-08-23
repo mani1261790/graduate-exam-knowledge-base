@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { academicFieldMatch, attemptInputError, conceptJaccard, effectiveScore, nextMastery, recommendationModeEligible, recommendationModeScore, recommendationScore, similarProblemScore } from "../src/worker/scoring";
+import { academicFieldMatch, attemptInputError, conceptJaccard, effectiveScore, nextMastery, predictedSuccess, recommendationModeEligible, recommendationModeScore, recommendationScore, relevanceAdjustedEvidence, similarProblemScore } from "../src/worker/scoring";
 
 describe("scoring", () => {
   it("matches information engineering users with computing departments", () => {
@@ -13,6 +13,17 @@ describe("scoring", () => {
   it("updates mastery with the configured exponential moving average", () => {
     expect(nextMastery(null, 0.8)).toBe(0.8);
     expect(nextMastery(0.4, 0.8)).toBeCloseTo(0.5);
+  });
+
+  it("adapts quickly with little evidence and stabilizes after repeated observations", () => {
+    expect(nextMastery(0.4, 0.8, 1)).toBeCloseTo(0.6);
+    expect(nextMastery(0.4, 0.8, 10)).toBeCloseTo(0.448);
+  });
+
+  it("treats direct tests as stronger evidence than prerequisite usage", () => {
+    expect(relevanceAdjustedEvidence(1, 0.4, 0.9)).toBeCloseTo(0.94);
+    expect(relevanceAdjustedEvidence(1, 0.4, 0.45)).toBeCloseTo(0.67);
+    expect(relevanceAdjustedEvidence(0, null, 0)).toBe(0.5);
   });
 
   it("penalizes hints, solution views, overtime, and mistakes", () => {
@@ -52,6 +63,14 @@ describe("scoring", () => {
     ).toBeCloseTo(0.745);
   });
 
+  it("predicts lower success for harder problems at the same estimated skill", () => {
+    const easy = predictedSuccess({ mastery: 0.7, prerequisiteReadiness: 0.8, difficulty: 2 });
+    const hard = predictedSuccess({ mastery: 0.7, prerequisiteReadiness: 0.8, difficulty: 5 });
+    expect(easy).toBeGreaterThan(hard);
+    expect(easy).toBeGreaterThanOrEqual(0);
+    expect(easy).toBeLessThanOrEqual(1);
+  });
+
   it("separates recommendation modes by learning purpose", () => {
     const base = {
       difficulty: 2,
@@ -67,6 +86,8 @@ describe("scoring", () => {
     expect(recommendationModeEligible("review", base)).toBe(false);
     expect(recommendationModeEligible("challenge", { ...base, difficulty: 5 })).toBe(true);
     expect(recommendationModeEligible("review", { ...base, hasAttempt: true })).toBe(true);
+    expect(recommendationModeEligible("foundation", { ...base, difficulty: 3, weakness: 0.55 })).toBe(true);
+    expect(recommendationModeEligible("foundation", { ...base, difficulty: 4, weakness: 0.55, prerequisiteReadiness: 0.8 })).toBe(false);
     expect(recommendationModeScore("foundation", base)).not.toBe(recommendationModeScore("challenge", { ...base, difficulty: 5 }));
   });
 

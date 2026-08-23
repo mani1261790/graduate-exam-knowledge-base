@@ -34,6 +34,7 @@ export interface ProblemListItem {
   publisher_page_url?: string | null;
   pdf_display_mode?: "embed" | "external_only";
   source_status?: "active" | "unavailable" | "needs_review";
+  governed_original?: boolean;
   concepts: ConceptSummary[];
 }
 

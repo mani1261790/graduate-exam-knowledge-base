@@ -49,11 +49,22 @@ jobs:
       - name: Run tests
         run: npm test
 
+      - name: Check public release safety
+        run: npm run public:check
+
       - name: Build application
         run: npm run build
 
       - name: Render production configuration
         run: node scripts/render-wrangler-config.mjs
+
+      - name: Record D1 Time Travel bookmark
+        if: ${{ env.CLOUDFLARE_D1_API_TOKEN != '' }}
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ env.CLOUDFLARE_D1_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: d1 time-travel info ${{ env.D1_DATABASE_NAME }} --config wrangler.production.jsonc --json
 
       - name: Apply production D1 migrations
         if: ${{ env.CLOUDFLARE_D1_API_TOKEN != '' }}
