@@ -41,7 +41,7 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",
-    "hono": "^4.6.16",
+    "hono": "^4.13.11",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
@@ -51,8 +51,15 @@
     "@types/react": "^19.0.8",
     "@types/react-dom": "^19.0.3",
     "typescript": "^5.7.3",
-    "vite": "^6.0.7",
-    "vitest": "^4.1.10",
+    "vite": "^6.4.4",
+    "vitest": "^4.1.12",
     "wrangler": "^4.24.0"
+  },
+  "overrides": {
+    "baseline-browser-mapping@2.10.42": "2.11.0",
+    "browserslist@4.28.5": "4.28.7",
+    "sharp@0.35.2": "0.35.5",
+    "source-map-js@1.2.1": "1.2.2",
+    "undici@7.29.0": "7.29.1"
   }
 }
